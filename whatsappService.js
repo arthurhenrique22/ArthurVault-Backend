@@ -9,6 +9,7 @@ class WhatsAppService {
     this.qrCode = null;
     this.io = null;
     this.errorDetails = null;
+    this.groupsPromise = null;
   }
 
   setIo(io) {
@@ -210,18 +211,59 @@ class WhatsAppService {
   }
 
   async getGroups() {
+    console.log('[GROUPS] Request received');
+    console.log('[GROUPS] Client exists:', !!this.client);
+    console.log('[GROUPS] WhatsApp state:', this.status);
+    
     if (this.status !== 'READY' || !this.client) {
       throw new Error('WhatsApp is not ready');
     }
-    console.log('[GROUPS] Loading groups');
-    const chats = await this.client.getChats();
-    const groups = chats.filter(chat => chat.isGroup).map(group => ({
-      id: group.id._serialized,
-      name: group.name,
-      participantsCount: group.participants ? group.participants.length : 0
-    }));
-    console.log(`[GROUPS] Groups found: ${groups.length}`);
-    return groups;
+
+    if (this.groupsPromise) {
+      console.log('[GROUPS] Returning existing groups promise');
+      return this.groupsPromise;
+    }
+
+    this.groupsPromise = this._actuallyLoadGroups();
+    
+    try {
+      return await this.groupsPromise;
+    } finally {
+      this.groupsPromise = null;
+    }
+  }
+
+  async _actuallyLoadGroups() {
+    console.log('[GROUPS] Calling client.getChats()');
+    
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('getChats timeout after 30000ms')), 30000);
+      });
+
+      const chats = await Promise.race([
+        this.client.getChats(),
+        timeoutPromise
+      ]);
+
+      console.log(`[GROUPS] getChats resolved: ${chats.length}`);
+      console.log(`[GROUPS] Total chats returned: ${chats.length}`);
+
+      const groupChats = chats.filter(chat => chat.isGroup === true);
+      console.log(`[GROUPS] Group chats after filter: ${groupChats.length}`);
+
+      const groups = groupChats.map(group => ({
+        id: group.id._serialized,
+        name: group.name,
+        participantsCount: Array.isArray(group.participants) ? group.participants.length : 0
+      }));
+
+      console.log(`[GROUPS] Groups found: ${groups.length}`);
+      return groups;
+    } catch (error) {
+      console.error('[GROUPS] getChats FAILED:', error);
+      throw error;
+    }
   }
 
   async getGroupParticipants(groupId) {
