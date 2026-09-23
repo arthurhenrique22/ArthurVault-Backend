@@ -70,6 +70,24 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('wa:get_groups', async (callback) => {
+    try {
+      const groups = await whatsappService.getGroups();
+      callback({ success: true, groups });
+    } catch (err) {
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  socket.on('wa:get_group_participants', async (groupId, callback) => {
+    try {
+      const participants = await whatsappService.getGroupParticipants(groupId);
+      callback({ success: true, participants });
+    } catch (err) {
+      callback({ success: false, error: err.message });
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
   });

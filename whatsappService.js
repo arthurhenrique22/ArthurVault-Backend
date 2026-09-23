@@ -208,6 +208,71 @@ class WhatsAppService {
     }
     return await this.client.getContacts();
   }
+
+  async getGroups() {
+    if (this.status !== 'READY' || !this.client) {
+      throw new Error('WhatsApp is not ready');
+    }
+    console.log('[GROUPS] Loading groups');
+    const chats = await this.client.getChats();
+    const groups = chats.filter(chat => chat.isGroup).map(group => ({
+      id: group.id._serialized,
+      name: group.name,
+      participantsCount: group.participants ? group.participants.length : 0
+    }));
+    console.log(`[GROUPS] Groups found: ${groups.length}`);
+    return groups;
+  }
+
+  async getGroupParticipants(groupId) {
+    if (this.status !== 'READY' || !this.client) {
+      throw new Error('WhatsApp is not ready');
+    }
+    console.log(`[GROUP] Selected: ${groupId}`);
+    const chat = await this.client.getChatById(groupId);
+    if (!chat || !chat.isGroup) {
+      throw new Error('Group not found or not a valid group');
+    }
+
+    console.log(`[GROUP] Participants: ${chat.participants.length}`);
+    const extracted = [];
+    let validCount = 0;
+
+    // We fetch contacts iteratively to get name and number securely without making too many concurrent requests that might freeze
+    for (const participant of chat.participants) {
+      try {
+        const contact = await this.client.getContactById(participant.id._serialized);
+        
+        let number = contact.number;
+        if (!number && contact.id && contact.id.user) {
+          number = contact.id.user;
+        }
+
+        if (number) {
+          validCount++;
+        }
+
+        extracted.push({
+          id: contact.id._serialized || participant.id._serialized,
+          number: number || '',
+          name: contact.name || '',
+          pushname: contact.pushname || '',
+          shortName: contact.shortName || ''
+        });
+      } catch (err) {
+         // Fallback if contact fetch fails
+         extracted.push({
+          id: participant.id._serialized,
+          number: participant.id.user || '',
+          name: '',
+          pushname: '',
+          shortName: ''
+        });
+      }
+    }
+    console.log(`[CONTACTS] Valid numbers: ${validCount}`);
+    return extracted;
+  }
 }
 
 module.exports = new WhatsAppService();
