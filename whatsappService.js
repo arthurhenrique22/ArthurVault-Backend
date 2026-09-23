@@ -1,5 +1,6 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const fs = require('fs');
+const puppeteer = require('puppeteer-core'); // Requires puppeteer-core or puppeteer depending on the setup
 
 class WhatsAppService {
   constructor() {
@@ -70,23 +71,60 @@ class WhatsAppService {
       puppeteerOptions.executablePath = '/usr/bin/chromium';
     }
 
-    const browserPath = puppeteerOptions.executablePath || 'Default (Auto-detect)';
     console.log('[WA] Checking browser executable...');
-    console.log(`[WA] Executable Path: ${browserPath}`);
+    const knownPaths = [
+      process.env.PUPPETEER_EXECUTABLE_PATH,
+      '/usr/bin/chromium',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium-browser',
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+    ];
 
-    if (puppeteerOptions.executablePath) {
-      if (fs.existsSync(puppeteerOptions.executablePath)) {
-        console.log('[WA] Browser exists: true');
-      } else {
-        console.log('[WA] Browser exists: false');
-        console.error('[WA] Cannot start WhatsApp Client. Browser executable not found!');
-        this.status = 'ERROR';
-        this.errorDetails = { code: 'INIT_FAILED', message: 'Não foi possível iniciar o serviço de conexão.' };
-        this.emitStatus();
-        return;
+    let actualBrowserPath = null;
+    for (const p of knownPaths) {
+      if (p && fs.existsSync(p)) {
+        actualBrowserPath = p;
+        break;
       }
     }
 
+    if (!actualBrowserPath) {
+      console.log('[WA] Browser exists: false');
+      console.error('[WA] Cannot start WhatsApp Client. Browser executable not found!');
+      this.status = 'ERROR';
+      this.errorDetails = { code: 'INIT_FAILED', message: 'Não foi possível iniciar o serviço de conexão.' };
+      this.emitStatus();
+      return;
+    }
+
+    console.log(`[WA] Executable Path: ${actualBrowserPath}`);
+    console.log('[WA] Browser exists: true');
+    puppeteerOptions.executablePath = actualBrowserPath;
+
+    // Testar o browser real
+    try {
+      console.log('[WA] Browser launch test starting');
+      const testBrowser = await puppeteer.launch({
+        headless: true,
+        executablePath: actualBrowserPath,
+        args: puppeteerOptions.args
+      });
+      const version = await testBrowser.version();
+      console.log(`[WA] Browser version: ${version}`);
+      const page = await testBrowser.newPage();
+      await page.close();
+      await testBrowser.close();
+      console.log('[WA] Browser launch test: PASS');
+    } catch (launchError) {
+      console.error('[WA] Browser launch test: FAIL');
+      console.error(launchError);
+      this.status = 'ERROR';
+      this.errorDetails = { code: 'INIT_FAILED', message: 'Não foi possível iniciar o serviço de conexão.' };
+      this.emitStatus();
+      return;
+    }
+
+    console.log('[WA] Creating new Client instance...');
     this.client = new Client({
       authStrategy: new LocalAuth(),
       puppeteer: puppeteerOptions

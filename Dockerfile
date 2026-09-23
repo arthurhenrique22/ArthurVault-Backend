@@ -1,27 +1,22 @@
-FROM ghcr.io/puppeteer/puppeteer:24.38.0
+FROM node:20-bookworm-slim
 
-# Usar root temporariamente para copiar os arquivos e instalar dependências
-USER root
+# Install chromium and necessary dependencies
+RUN apt-get update && apt-get install -y \
+    chromium \
+    fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configurar a variável de ambiente do executável do Puppeteer
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 WORKDIR /app
 
-# Copiar os arquivos de pacote primeiro para aproveitar o cache do Docker
 COPY package*.json ./
-
-# Instalar as dependências do projeto
 RUN npm ci
 
-# Copiar o restante do código
 COPY . .
 
-# Mudar o proprietário dos arquivos para o usuário padrão do puppeteer (pptruser)
-RUN chown -R pptruser:pptruser /app
-
-# Voltar para o usuário sem privilégios para execução segura
-USER pptruser
-
-# A porta que o Express utiliza
 EXPOSE 3001
-
-# Comando de inicialização
 CMD ["node", "server.js"]
