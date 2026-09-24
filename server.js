@@ -137,6 +137,31 @@ io.on('connection', (socket) => {
     console.log('Client disconnected:', socket.id);
   });
 });
+app.get('/api/group-photo/:groupId', async (req, res) => {
+  try {
+    const groupId = decodeURIComponent(req.params.groupId);
+    // Uses the proxy logic to fetch the image bytes
+    // whatsapp-web.js profile picture usually returns a URL we have to fetch or bytes directly
+    // Let's resolve the URL via our new resolveGroupMetadata or directly getProfilePicUrl
+    const url = await whatsappService.client?.getProfilePicUrl(groupId);
+    if (!url) {
+      return res.status(404).send('No photo found');
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Failed to fetch image');
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    res.set('Content-Type', response.headers.get('content-type') || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=600'); // 10 minute cache
+    res.send(buffer);
+  } catch (error) {
+    console.error(`[PHOTO_PROXY_ERROR] ${error.message}`);
+    res.status(500).send('Error proxying photo');
+  }
+});
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {

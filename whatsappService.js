@@ -151,11 +151,8 @@ class WhatsAppService {
     console.log('[WA] Creating new Client instance...');
     this.client = new Client({
       authStrategy: new LocalAuth(),
-      puppeteer: puppeteerOptions,
-      webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-      }
+      puppeteer: puppeteerOptions
+      // webVersionCache is omitted to let whatsapp-web.js 1.34.7 use its native compatible version
     });
 
     console.log('[WA] Registering event listeners...');
@@ -267,183 +264,227 @@ class WhatsAppService {
     }
   }
 
-  async getRealParticipantCount(groupId, isDiag) {
-    let pCount = null;
+  // ==========================================
+  // ID NORMALIZATION
+  // ==========================================
+  normalizeGroupId(value) {
+     if (!value) return null;
+     if (typeof value === 'string') {
+        if (value.endsWith('@g.us')) return value;
+        if (value.includes('-')) return value + '@g.us';
+        return value;
+     }
+     if (typeof value === 'object') {
+        if (typeof value._serialized === 'string') return value._serialized;
+        if (typeof value.user === 'string' && typeof value.server === 'string') {
+           return `${value.user}@${value.server}`;
+        }
+     }
+     return String(value);
+  }
+
+  // ==========================================
+  // METADATA RESOLVER
+  // ==========================================
+  async resolveGroupMetadata(rawGroupId, isDiag) {
+    const groupId = this.normalizeGroupId(rawGroupId);
+    
+    let participantsCount = null;
+    let photoUrl = null;
+    let participantsSource = 'none';
+    let photoSource = 'none';
+    let errorDetails = null;
     let isCommunity = false;
 
-    try {
-      if (isDiag) console.log(`\n[ENRICH_DEBUG] START`);
-      if (isDiag) console.log(`[ENRICH_DEBUG] id=${groupId}`);
-      if (isDiag) console.log(`[ENRICH_DEBUG] getChatById starting`);
-      
-      const chat = await this.client.getChatById(groupId);
-      if (isDiag) {
-          console.log(`[ENRICH_DEBUG] getChatById success`);
-          console.log(`[ENRICH_DEBUG] chat constructor=${chat?.constructor?.name}`);
-          console.log(`[ENRICH_DEBUG] isGroup=${chat?.isGroup}`);
-          console.log(`[ENRICH_DEBUG] participants direct=${chat?.participants ? chat.participants.length : 'undefined'}`);
-          console.log(`[ENRICH_DEBUG] metadata=${!!chat?.groupMetadata}`);
-      }
+    // 1. PARTICIPANTS
 
-      if (chat && Array.isArray(chat.participants) && chat.participants.length > 0) {
-        pCount = chat.participants.length;
-        isCommunity = chat.isCommunity || false;
-      } else if (chat && chat.groupMetadata && Array.isArray(chat.groupMetadata.participants)) {
-        pCount = chat.groupMetadata.participants.length;
-        isCommunity = chat.isCommunity || false;
-      } else {
-        throw new Error('No participants array found on chat object');
-      }
-    } catch(err) {
-      console.log(`\n[PARTICIPANTS_NATIVE_ERROR]`);
-      console.log(`name=${err.name}`);
-      console.log(`message=${err.message}`);
-      console.log(`stack=${err.stack}`);
-      
-      // Full Fallback
-      try {
-         if (isDiag) console.log(`[ENRICH_DEBUG] fallback starting`);
-         const fallback = await this.client.pupPage.evaluate((gId, diag) => {
-             const result = { found: false, count: null, isCommunity: false, diag: {} };
-             
-             try {
-                if (diag) {
-                    result.diag.windowStore = !!window.Store;
-                    result.diag.windowWWebJS = !!window.WWebJS;
-                    result.diag.windowWAWebCollections = !!window.WAWebCollections;
-                    result.diag.windowRequire = !!window.require;
+    // A) Try the already fetched chats
+    let chatObj = this.loadedChatsCache ? this.loadedChatsCache.get(groupId) : null;
+    
+    if (chatObj) {
+        if (Array.isArray(chatObj.participants)) {
+            participantsCount = chatObj.participants.length;
+            participantsSource = 'getChats.GroupChat.participants';
+            isCommunity = chatObj.isCommunity || false;
+        } else if (chatObj.groupMetadata && Array.isArray(chatObj.groupMetadata.participants)) {
+            participantsCount = chatObj.groupMetadata.participants.length;
+            participantsSource = 'getChats.GroupChat.groupMetadata';
+            isCommunity = chatObj.isCommunity || false;
+        } else if (typeof chatObj.participants?.length === 'number') {
+            participantsCount = chatObj.participants.length;
+            participantsSource = 'getChats.GroupChat.participants.length';
+            isCommunity = chatObj.isCommunity || false;
+        } else if (chatObj.participants && typeof chatObj.participants._models?.length === 'number') {
+            participantsCount = chatObj.participants._models.length;
+            participantsSource = 'getChats.GroupChat.participants._models';
+            isCommunity = chatObj.isCommunity || false;
+        } else if (chatObj.participants && typeof chatObj.participants.size === 'number') {
+            participantsCount = chatObj.participants.size;
+            participantsSource = 'getChats.GroupChat.participants.size';
+            isCommunity = chatObj.isCommunity || false;
+        }
+    }
+
+    // B) Try getChatById if not found
+    if (typeof participantsCount !== 'number') {
+        try {
+            const freshChat = await this.client.getChatById(groupId);
+            if (freshChat) {
+                if (Array.isArray(freshChat.participants)) {
+                    participantsCount = freshChat.participants.length;
+                    participantsSource = 'getChatById.participants';
+                    isCommunity = freshChat.isCommunity || false;
+                } else if (freshChat.groupMetadata && Array.isArray(freshChat.groupMetadata.participants)) {
+                    participantsCount = freshChat.groupMetadata.participants.length;
+                    participantsSource = 'getChatById.groupMetadata';
+                    isCommunity = freshChat.isCommunity || false;
+                } else if (typeof freshChat.participants?.length === 'number') {
+                    participantsCount = freshChat.participants.length;
+                    participantsSource = 'getChatById.participants.length';
+                    isCommunity = freshChat.isCommunity || false;
+                } else if (freshChat.participants && typeof freshChat.participants._models?.length === 'number') {
+                    participantsCount = freshChat.participants._models.length;
+                    participantsSource = 'getChatById.participants._models';
+                    isCommunity = freshChat.isCommunity || false;
+                } else if (freshChat.participants && typeof freshChat.participants.size === 'number') {
+                    participantsCount = freshChat.participants.size;
+                    participantsSource = 'getChatById.participants.size';
+                    isCommunity = freshChat.isCommunity || false;
                 }
+            }
+        } catch(err) {
+            if (isDiag) {
+                console.log(`[PARTICIPANTS_NATIVE_ERROR] strategy=getChatById name=${err.name} message=${err.message}`);
+            }
+        }
+    }
+
+    // C) Try pupPage.evaluate (deep dive)
+    if (typeof participantsCount !== 'number') {
+        try {
+            const fallback = await this.client.pupPage.evaluate((gId) => {
+                let count = null;
+                let isComm = false;
+
+                const extractSize = (val) => {
+                    if (!val) return null;
+                    if (Array.isArray(val)) return val.length;
+                    if (typeof val.length === 'number') return val.length;
+                    if (typeof val.size === 'number') return val.size;
+                    if (Array.isArray(val._models)) return val._models.length;
+                    if (Array.isArray(val.models)) return val.models.length;
+                    if (typeof val.getModelsArray === 'function') {
+                        const arr = val.getModelsArray();
+                        if (Array.isArray(arr)) return arr.length;
+                    }
+                    return null;
+                };
 
                 let chatModel = null;
                 let metadataModel = null;
 
-                // Attempt 1: window.Store
-                if (window.Store) {
-                    if (window.Store.Chat) chatModel = window.Store.Chat.get(gId);
-                    if (window.Store.GroupMetadata) metadataModel = window.Store.GroupMetadata.get(gId);
+                if (window.Store && window.Store.Chat) chatModel = window.Store.Chat.get(gId);
+                if (window.Store && window.Store.GroupMetadata) metadataModel = window.Store.GroupMetadata.get(gId);
+
+                if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
+                if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
+
+                if (!chatModel && window.WWebJS && typeof window.WWebJS.getChatModel === 'function') chatModel = window.WWebJS.getChatModel(gId);
+
+                if (metadataModel) {
+                    count = extractSize(metadataModel.participants);
+                    isComm = !!metadataModel.isCommunity;
+                    if (typeof count === 'number') return { count, isComm, source: 'evaluate.GroupMetadata' };
                 }
 
-                // Attempt 2: WAWebCollections
-                if (!chatModel && window.WAWebCollections) {
-                    if (window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
-                    if (window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
+                if (chatModel) {
+                    count = extractSize(chatModel.participants);
+                    isComm = !!chatModel.isCommunity;
+                    if (typeof count === 'number') return { count, isComm, source: 'evaluate.Chat.participants' };
+                    
+                    if (chatModel.groupMetadata) {
+                        count = extractSize(chatModel.groupMetadata.participants);
+                        isComm = !!chatModel.isCommunity;
+                        if (typeof count === 'number') return { count, isComm, source: 'evaluate.Chat.groupMetadata' };
+                    }
                 }
 
-                // Try to extract count
-                if (metadataModel && metadataModel.participants) {
-                    const arr = metadataModel.participants;
-                    result.found = true;
-                    result.count = typeof arr.length === 'number' ? arr.length : (arr._models ? arr._models.length : null);
-                    result.isCommunity = !!metadataModel.isCommunity;
-                } else if (chatModel && chatModel.participants) {
-                    const arr = chatModel.participants;
-                    result.found = true;
-                    result.count = typeof arr.length === 'number' ? arr.length : (arr._models ? arr._models.length : null);
-                    result.isCommunity = !!chatModel.isCommunity;
-                } else if (chatModel && chatModel.groupMetadata && chatModel.groupMetadata.participants) {
-                    const arr = chatModel.groupMetadata.participants;
-                    result.found = true;
-                    result.count = typeof arr.length === 'number' ? arr.length : (arr._models ? arr._models.length : null);
-                    result.isCommunity = !!chatModel.isCommunity;
-                }
+                return { count: null, isComm: false, source: 'evaluate.failed' };
+            }, groupId);
 
-                if (diag) {
-                   result.diag.chatModelExists = !!chatModel;
-                   result.diag.metadataModelExists = !!metadataModel;
-                   result.diag.extractedCount = result.count;
-                }
-             } catch(e) {
-                if (diag) result.diag.evalError = e.message;
-             }
-             return result;
-         }, groupId, isDiag);
-         
-         if (isDiag) console.log(`[ENRICH_DEBUG] fallback diag: ${JSON.stringify(fallback.diag)}`);
-         
-         if (fallback && fallback.found && typeof fallback.count === 'number') {
-            pCount = fallback.count;
-            isCommunity = fallback.isCommunity;
-            if (isDiag) console.log(`[ENRICH_DEBUG] fallback success: count=${pCount}`);
-         } else {
-            if (isDiag) console.log(`[ENRICH_DEBUG] fallback failed to find count`);
-         }
-      } catch(e) {
-          if (isDiag) {
-             console.log(`\n[PARTICIPANTS_FALLBACK_ERROR]`);
-             console.log(`strategy=evaluate`);
-             console.log(`name=${e.name}`);
-             console.log(`message=${e.message}`);
-             console.log(`stack=${e.stack}`);
-          }
-      }
+            if (fallback && typeof fallback.count === 'number') {
+                participantsCount = fallback.count;
+                participantsSource = fallback.source;
+                isCommunity = fallback.isComm;
+            } else if (isDiag) {
+                errorDetails = 'All fallback strategies failed to find a valid participants array length.';
+            }
+        } catch(err) {
+            if (isDiag) {
+                console.log(`[PARTICIPANTS_FALLBACK_ERROR] strategy=evaluate name=${err.name} message=${err.message}`);
+            }
+        }
     }
 
-    if (isDiag) console.log(`[ENRICH_DEBUG] participant count=${pCount}`);
-    return { pCount, isCommunity };
-  }
+    // 2. PHOTO
 
-  async getRealGroupPhoto(groupId, isDiag) {
     try {
-      if (isDiag) console.log(`[ENRICH_DEBUG] profilePic starting`);
-      const photoUrl = await this.client.getProfilePicUrl(groupId);
-      if (isDiag) {
-          console.log(`[ENRICH_DEBUG] profilePic result=${photoUrl}`);
-      }
-      return photoUrl || null;
+        const url = await this.client.getProfilePicUrl(groupId);
+        if (typeof url === 'string') {
+            photoUrl = url;
+            photoSource = 'getProfilePicUrl';
+        }
     } catch(err) {
-      console.log(`\n[PHOTO_NATIVE_ERROR]`);
-      console.log(`name=${err.name}`);
-      console.log(`message=${err.message}`);
-      console.log(`stack=${err.stack}`);
-
-      // Fallback
-      try {
-         if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback starting`);
-         const fallback = await this.client.pupPage.evaluate(async (gId, diag) => {
-             const result = { found: false, url: null, diag: {} };
-             try {
+        if (isDiag) {
+            console.log(`[PHOTO_NATIVE_ERROR] strategy=getProfilePicUrl name=${err.name} message=${err.message}`);
+        }
+        
+        try {
+            const fallbackPic = await this.client.pupPage.evaluate(async (gId) => {
                 let profilePicModule = null;
                 if (window.Store && window.Store.ProfilePic) profilePicModule = window.Store.ProfilePic;
                 else if (window.WAWebCollections && window.WAWebCollections.ProfilePic) profilePicModule = window.WAWebCollections.ProfilePic;
                 
                 if (profilePicModule && typeof profilePicModule.profilePicFind === 'function') {
                     const res = await profilePicModule.profilePicFind(gId);
-                    result.found = true;
-                    result.url = res ? res.eurl : null;
+                    return { url: res ? res.eurl : null, source: 'evaluate.ProfilePic.profilePicFind' };
                 } else if (profilePicModule && typeof profilePicModule.requestProfilePicFromServer === 'function') {
                     const res = await profilePicModule.requestProfilePicFromServer(gId);
-                    result.found = true;
-                    result.url = res ? res.eurl : null;
+                    return { url: res ? res.eurl : null, source: 'evaluate.ProfilePic.requestProfilePicFromServer' };
                 } else if (window.WWebJS && typeof window.WWebJS.getProfilePicThumb === 'function') {
                     const res = await window.WWebJS.getProfilePicThumb(gId);
-                    result.found = true;
-                    result.url = res ? res.img : null;
+                    return { url: res ? res.img : null, source: 'evaluate.WWebJS.getProfilePicThumb' };
                 }
-                if (diag) result.diag.moduleExists = !!profilePicModule;
-             } catch(e) {
-                 if (diag) result.diag.evalError = e.message;
-             }
-             return result;
-         }, groupId, isDiag);
-         
-         if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback diag: ${JSON.stringify(fallback.diag)}`);
-         
-         if (fallback && fallback.found) {
-            if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback result=${fallback.url}`);
-            return fallback.url || null;
-         }
-      } catch(e) {
-          if (isDiag) {
-             console.log(`\n[PHOTO_FALLBACK_ERROR]`);
-             console.log(`strategy=evaluate`);
-             console.log(`name=${e.name}`);
-             console.log(`message=${e.message}`);
-             console.log(`stack=${e.stack}`);
-          }
-      }
+                return { url: null, source: 'evaluate.failed' };
+            }, groupId);
 
-      return undefined; // undefined indicates error fetching, null indicates explicitly no photo
+            if (fallbackPic && typeof fallbackPic.url === 'string') {
+                photoUrl = fallbackPic.url;
+                photoSource = fallbackPic.source;
+            } else if (fallbackPic && fallbackPic.source !== 'evaluate.failed') {
+                photoUrl = null;
+                photoSource = fallbackPic.source;
+            }
+        } catch(err) {
+            if (isDiag) {
+                console.log(`[PHOTO_FALLBACK_ERROR] strategy=evaluate name=${err.name} message=${err.message}`);
+            }
+        }
     }
+
+    if (typeof participantsCount === 'number' && participantsCount <= 0) {
+        participantsCount = null;
+    }
+
+    return {
+        id: groupId,
+        participantsCount,
+        photoUrl,
+        participantsSource,
+        photoSource,
+        error: errorDetails,
+        isCommunity
+    };
   }
 
   async _startEnrichment(groups) {
@@ -453,135 +494,89 @@ class WhatsAppService {
     console.log(`[GROUP_ENRICH] started: ${groups.length}`);
     console.log(`========================================\n`);
 
-    this.groupCache.clear();
-    console.log(`[GROUP_ENRICH] Cache cleared for diagnostic.`);
-
-    try {
-      const waDiag = await this.client.pupPage.evaluate(() => {
-        return {
-          whatsappVersion: window.Debug?.VERSION ?? null,
-          hasStore: !!window.Store,
-          storeKeys: window.Store ? Object.keys(window.Store).sort() : [],
-          hasWWebJS: !!window.WWebJS,
-          wwebjsKeys: window.WWebJS ? Object.keys(window.WWebJS).sort() : [],
-          hasWAWebCollections: !!window.WAWebCollections,
-          waWebCollectionsKeys: window.WAWebCollections ? Object.keys(window.WAWebCollections).sort() : []
-        };
-      });
-      console.log(`========== WA RUNTIME DIAGNOSTIC ==========`);
-      console.log(`whatsapp-web.js package version: 1.34.7`);
-      console.log(`Requested web version cache: 2.2412.54.html`);
-      console.log(`WhatsApp Web version: ${waDiag.whatsappVersion}`);
-      console.log(`Store exists: ${waDiag.hasStore}`);
-      console.log(`Store keys: ${waDiag.storeKeys.join(', ')}`);
-      console.log(`WWebJS exists: ${waDiag.hasWWebJS}`);
-      console.log(`WWebJS keys: ${waDiag.wwebjsKeys.join(', ')}`);
-      console.log(`WAWebCollections exists: ${waDiag.hasWAWebCollections}`);
-      console.log(`WAWebCollections keys: ${waDiag.waWebCollectionsKeys.join(', ')}`);
-      console.log(`===========================================`);
-    } catch(e) {
-      console.log(`Error running WA RUNTIME DIAGNOSTIC: ${e.message}`);
-    }
-
-    const diagnosticGroup = groups.find(g => g.id.endsWith('@g.us'));
-    if (!diagnosticGroup) {
-      console.log(`[GROUP_ENRICH] No @g.us group found to test.`);
-      return;
-    }
-
-    console.log(`\n========================================`);
-    console.log(`TESTING SINGLE GROUP: ${diagnosticGroup.id}`);
-    console.log(`========================================\n`);
-
-    try {
-      const groupModelDiag = await this.client.pupPage.evaluate((gId) => {
-        let model = null;
-        let source = 'none';
-
-        if (window.Store && window.Store.Chat) {
-          model = window.Store.Chat.get(gId);
-          if (model) source = 'Store.Chat';
-        }
-        if (!model && window.WAWebCollections && window.WAWebCollections.Chat) {
-           model = window.WAWebCollections.Chat.get(gId);
-           if (model) source = 'WAWebCollections.Chat';
-        }
-        if (!model && window.WWebJS && typeof window.WWebJS.getChatModel === 'function') {
-           model = window.WWebJS.getChatModel(gId);
-           if (model) source = 'WWebJS.getChatModel';
-        }
-
-        if (!model) {
-           return { source, found: false };
-        }
-
-        return {
-          source,
-          found: true,
-          id: model.id ? model.id._serialized : undefined,
-          constructorName: model.constructor ? model.constructor.name : 'Unknown',
-          ownKeys: Object.keys(model).filter(k => !k.startsWith('_')),
-          prototypeKeys: Object.getOwnPropertyNames(Object.getPrototypeOf(model) || {}),
-          nestedCandidates: {
-             participantsType: typeof model.participants,
-             groupMetadataType: typeof model.groupMetadata,
-             metadataType: typeof model.metadata,
-             contactType: typeof model.contact,
-             profilePicThumbType: typeof model.profilePicThumb
-          }
-        };
-      }, diagnosticGroup.id);
-
-      console.log(`========== REAL GROUP MODEL ==========`);
-      console.log(`SOURCE: ${groupModelDiag.source}`);
-      console.log(`ID: ${groupModelDiag.id}`);
-      console.log(`CONSTRUCTOR: ${groupModelDiag.constructorName}`);
-      console.log(`OWN KEYS: ${groupModelDiag.ownKeys ? groupModelDiag.ownKeys.join(', ') : ''}`);
-      console.log(`PROTOTYPE KEYS: ${groupModelDiag.prototypeKeys ? groupModelDiag.prototypeKeys.join(', ') : ''}`);
-      if (groupModelDiag.nestedCandidates) {
-         console.log(`participants type: ${groupModelDiag.nestedCandidates.participantsType}`);
-         console.log(`groupMetadata type: ${groupModelDiag.nestedCandidates.groupMetadataType}`);
-         console.log(`metadata type: ${groupModelDiag.nestedCandidates.metadataType}`);
-         console.log(`contact type: ${groupModelDiag.nestedCandidates.contactType}`);
-         console.log(`profilePicThumb type: ${groupModelDiag.nestedCandidates.profilePicThumbType}`);
-      }
-      console.log(`======================================`);
-    } catch(e) {
-      console.log(`Error running REAL GROUP MODEL: ${e.message}`);
-    }
-
-    try {
-       const moduleDiscovery = await this.client.pupPage.evaluate(() => {
-          return Object.keys(window.Store || {}).filter(k => /group|participant|chat|contact|profile|pic|wid/i.test(k));
-       });
-       console.log(`[WA_MODULE_DISCOVERY] ${moduleDiscovery.join(', ')}`);
-    } catch(e) {
-       console.log(`Error running WA_MODULE_DISCOVERY: ${e.message}`);
-    }
-
-    console.log(`\nStarting single group extraction for: ${diagnosticGroup.id}`);
+    let enrichedCount = 0;
+    let photosFound = 0;
+    let photosUnavailable = 0;
+    let photosFailed = 0;
+    let participantsLoaded = 0;
+    let participantsFailed = 0;
     
-    // Test getRealParticipantCount and getRealGroupPhoto for the FIRST GROUP only for diagnostic!
-    const { pCount, isCommunity } = await this.getRealParticipantCount(diagnosticGroup.id, true);
-    const photoUrl = await this.getRealGroupPhoto(diagnosticGroup.id, true);
+    const limit = 3;
+    const active = new Set();
+    let processed = 0;
 
-    console.log(`\n========== SINGLE GROUP TEST ==========`);
-    console.log(`id=${diagnosticGroup.id}`);
-    console.log(`name=${diagnosticGroup.name}`);
-    console.log(`participantCount=${pCount}`);
-    console.log(`photoUrl=${photoUrl}`);
-    console.log(`=======================================`);
+    for (const group of groups) {
+      if (!this.client || this.status !== 'READY') break;
 
-    // Emit to dashboard just to update one card
-    this.io?.emit('wa:group_enriched', {
-       id: diagnosticGroup.id,
-       photoUrl: photoUrl || null,
-       participantCount: pCount,
-       isCommunity,
-       participantStatus: typeof pCount === 'number' ? 'success' : 'failed',
-       photoStatus: typeof photoUrl === 'string' ? 'success' : (photoUrl === null ? 'no_photo' : 'failed')
-    });
-  }
+      const enrichTask = (async () => {
+        processed++;
+        const isDiag = processed <= 3; // Mostrar diagnóstico dos 3 primeiros apenas
+        const rawGroupId = group.id;
+
+        const result = await this.resolveGroupMetadata(rawGroupId, isDiag);
+
+        if (isDiag) {
+            console.log(`\n[GROUP_VERIFY]`);
+            console.log(`name=${group.name}`);
+            console.log(`id=${result.id}`);
+            console.log(`participants=${result.participantsCount}`);
+            console.log(`participantsSource=${result.participantsSource}`);
+            console.log(`photo=${typeof result.photoUrl === 'string' ? 'true' : (result.photoUrl === null && result.photoSource !== 'none' ? 'no_photo' : 'false')}`);
+            console.log(`photoSource=${result.photoSource}`);
+        }
+
+        const proxyPhotoUrl = result.photoUrl ? `${process.env.PUBLIC_URL || 'https://arthurvault-backend-production.up.railway.app'}/api/group-photo/${encodeURIComponent(result.id)}` : null;
+
+        const enriched = { 
+          id: result.id, 
+          photoUrl: proxyPhotoUrl, 
+          participantsCount: result.participantsCount,
+          isCommunity: result.isCommunity,
+          participantStatus: typeof result.participantsCount === 'number' ? 'success' : 'failed',
+          photoStatus: typeof result.photoUrl === 'string' ? 'success' : (result.photoUrl === null && result.photoSource !== 'none' ? 'no_photo' : 'failed')
+        };
+        
+        if (enriched.participantStatus === 'success' || enriched.photoStatus === 'success' || enriched.photoStatus === 'no_photo') {
+            this.groupCache.set(result.id, enriched);
+        }
+        
+        this.io?.emit('wa:group_enriched', enriched);
+        
+        if (enriched.participantStatus === 'success') participantsLoaded++;
+        else participantsFailed++;
+
+        if (enriched.photoStatus === 'success') photosFound++;
+        else if (enriched.photoStatus === 'no_photo') photosUnavailable++;
+        else photosFailed++;
+
+        enrichedCount++;
+      })();
+
+      active.add(enrichTask);
+      enrichTask.finally(() => active.delete(enrichTask));
+      
+      if (active.size >= limit) {
+        await Promise.race(active);
+      }
+    }
+    
+    await Promise.all(active);
+    
+    console.log(`\n========================================`);
+    console.log(`ARTHURVAULT GROUP ENRICHMENT REPORT`);
+    console.log(`========================================`);
+    console.log(`WHATSAPP-WEB.JS VERSION: 1.34.7`);
+    console.log(`WEB VERSION REQUESTED: Native default (none forced)`);
+    console.log(`GROUPS DISCOVERED: ${groups.length}`);
+    console.log(`GROUPS ENRICHED: ${enrichedCount}\n`);
+    console.log(`PARTICIPANTS:`);
+    console.log(`SUCCESS: ${participantsLoaded}`);
+    console.log(`FAILED: ${participantsFailed}\n`);
+    console.log(`PHOTOS:`);
+    console.log(`SUCCESS: ${photosFound}`);
+    console.log(`NO PHOTO: ${photosUnavailable}`);
+    console.log(`FAILED: ${photosFailed}`);
+    console.log(`========================================\n`);
 
   async runDiagnostic() {
     if (!this.client || !this.client.pupPage) {
@@ -841,13 +836,18 @@ class WhatsAppService {
 
     let identifiedByGus = 0;
     
+    this.loadedChatsCache = new Map();
     const groupChats = chats.filter(chat => {
       const id = getSerializedChatId(chat);
       const endsWithGus = id.endsWith('@g.us') || chat?.id?.server === 'g.us';
       
       if (endsWithGus) identifiedByGus++;
       
-      return isWhatsAppGroup(chat);
+      const isGroup = isWhatsAppGroup(chat);
+      if (isGroup) {
+          this.loadedChatsCache.set(id, chat);
+      }
+      return isGroup;
     });
 
     console.log(`[GROUPS] @g.us identified: ${identifiedByGus}`);
