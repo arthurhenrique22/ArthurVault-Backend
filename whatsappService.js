@@ -151,11 +151,18 @@ class WhatsAppService {
     console.log('[WA] Creating new Client instance...');
     this.client = new Client({
       authStrategy: new LocalAuth(),
-      puppeteer: puppeteerOptions
-      // webVersionCache is omitted to let whatsapp-web.js 1.34.7 use its native compatible version
+      puppeteer: puppeteerOptions,
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+      }
     });
 
     console.log('[WA] Registering event listeners...');
+
+    this.client.on('change_state', state => {
+      console.log('[QR_FLOW] change_state:', state);
+    });
 
     this.client.on('qr', (qr) => {
       console.log('[QR_FLOW] qr received');
@@ -201,6 +208,11 @@ class WhatsAppService {
     try {
       await this.client.initialize();
       console.log('[WA] client.initialize() promise resolved (Browser started).');
+      if (this.client.pupPage) {
+          this.client.pupPage.on('console', msg => console.log('[PUP_CONSOLE]', msg.type(), msg.text()));
+          this.client.pupPage.on('pageerror', err => console.error('[PUP_PAGE_ERROR]', err.message));
+          this.client.pupPage.on('error', err => console.error('[PUP_ERROR]', err.message));
+      }
     } catch (error) {
       console.error("[WA_INIT] FAILED");
       if (error instanceof Error) {
