@@ -373,8 +373,7 @@ class WhatsAppService {
                 if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
                 if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
 
-                if (!chatModel && window.WWebJS && typeof window.WWebJS.getChatModel === 'function') chatModel = window.WWebJS.getChatModel(gId);
-
+                // Removed WWebJS.getChatModel because it expects an internal chat object, not a string ID.
                 if (metadataModel) {
                     count = extractSize(metadataModel.participants);
                     isComm = !!metadataModel.isCommunity;
@@ -402,6 +401,16 @@ class WhatsAppService {
                 isCommunity = fallback.isComm;
             } else if (isDiag) {
                 errorDetails = 'All fallback strategies failed to find a valid participants array length.';
+            }
+
+            if (groupId === '120363359964959175@g.us') {
+                console.log('\n[PARTICIPANTS_RUNTIME]');
+                console.log(`groupId=${groupId}`);
+                console.log(`metadataExists=${!!fallback}`);
+                console.log(`participantsExists=${fallback && fallback.count !== null}`);
+                console.log(`participantsType=${fallback ? fallback.source : 'none'}`);
+                console.log(`count=${participantsCount}`);
+                console.log(`source=${participantsSource}`);
             }
         } catch(err) {
             if (isDiag) {
@@ -472,6 +481,15 @@ class WhatsAppService {
             } else if (fallbackPic && fallbackPic.source !== 'evaluate.failed') {
                 photoUrl = null;
                 photoSource = fallbackPic.source;
+            }
+
+            if (groupId === '120363359964959175@g.us') {
+                console.log('\n[PHOTO_RUNTIME]');
+                console.log(`groupId=${groupId}`);
+                console.log(`success=${!!photoUrl}`);
+                console.log(`url=${photoUrl}`);
+                console.log(`source=${photoSource}`);
+                console.log(`error=none`);
             }
         } catch(err) {
             if (isDiag) {

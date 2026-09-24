@@ -28,13 +28,40 @@ async function testProd() {
         if (enrichedCount <= 3 || enriched.photoUrl) {
             console.log(`[CLIENT] GROUP_ENRICH_RECEIVED [${enrichedCount}]:`, JSON.stringify(enriched, null, 2));
             
-            // Test extraction on the first group that has participants or photo
             if (enrichedCount === 1) {
+                console.log(`\n[GROUP_ENRICH_EMIT]`);
+                console.log(`id=${enriched.id}`);
+                console.log(`participantsCount=${enriched.participantsCount}`);
+                console.log(`photoUrl=${enriched.photoUrl}`);
+                console.log(`photoStatus=${enriched.photoStatus}`);
+
                 console.log(`\n[CLIENT] Requesting participants for group: ${enriched.id}`);
-                socket.emit('wa:get_group_participants', enriched.id, (res) => {
+                socket.emit('wa:get_group_participants', enriched.id, async (res) => {
                     if (res.success) {
-                        console.log(`[CLIENT] PARTICIPANTS RECEIVED! Count: ${res.participants.length}`);
-                        console.log(`[CLIENT] First participant:`, res.participants[0]);
+                        let photoStatus = 404;
+                        let photoContentType = 'none';
+                        if (enriched.photoUrl) {
+                            try {
+                                const proxyRes = await fetch(enriched.photoUrl);
+                                photoStatus = proxyRes.status;
+                                photoContentType = proxyRes.headers.get('content-type') || 'unknown';
+                            } catch (e) {
+                                photoStatus = 'error';
+                            }
+                        }
+
+                        console.log(`\n[GROUP_RUNTIME_TEST]`);
+                        console.log(`id=${enriched.id}`);
+                        console.log(`name=${enriched.name}`);
+                        console.log(`metadataFound=true`);
+                        console.log(`participantsArrayFound=${res.participants.length > 0}`);
+                        console.log(`participantsCount=${res.participants.length}`);
+                        console.log(`photoResolved=${!!enriched.photoUrl}`);
+                        console.log(`photoUrl=${enriched.photoUrl}`);
+                        console.log(`photoRequestStatus=${photoStatus}`);
+                        console.log(`photoContentType=${photoContentType}`);
+                        
+                        setTimeout(() => process.exit(0), 1000);
                     } else {
                         console.error(`[CLIENT] PARTICIPANTS ERROR:`, res.error);
                     }
