@@ -527,11 +527,19 @@ class WhatsAppService {
     let participantsLoaded = 0;
     let participantsFailed = 0;
     
-    const limit = 3;
+    const limit = 1;
     const active = new Set();
     let processed = 0;
 
-    for (const group of groups) {
+    const isolatedGroups = groups.filter(g => g.id === '120363359964959175@g.us');
+    if (isolatedGroups.length === 0) {
+        console.log(`[GROUP_ENRICH] Group 120363359964959175@g.us not found in list. Aborting.`);
+        return;
+    }
+    
+    console.log(`[GROUP_ENRICH] Isolating diagnostics. Processing only group: 120363359964959175@g.us`);
+
+    for (const group of isolatedGroups) {
       if (!this.client || this.status !== 'READY') break;
 
       const enrichTask = (async () => {
@@ -567,6 +575,13 @@ class WhatsAppService {
             this.groupCache.set(result.id, enriched);
         }
         
+        console.log(`\n[GROUP_ENRICH_EMIT]`);
+        console.log(`id=${enriched.id}`);
+        console.log(`participantsCount=${enriched.participantsCount}`);
+        console.log(`participantStatus=${enriched.participantStatus}`);
+        console.log(`photoUrl=${enriched.photoUrl}`);
+        console.log(`photoStatus=${enriched.photoStatus}`);
+
         this.io?.emit('wa:group_enriched', enriched);
         
         if (enriched.participantStatus === 'success') participantsLoaded++;
