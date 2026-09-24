@@ -43,6 +43,15 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/diag', async (req, res) => {
+  try {
+    const diag = await whatsappService.runDiagnostic();
+    res.json({ success: true, diagnostic: diag });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, stack: e.stack });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   
@@ -54,7 +63,43 @@ io.on('connection', (socket) => {
   });
 
   socket.on('wa:start', () => {
+    // Keep for legacy just in case
     whatsappService.initialize();
+  });
+
+  socket.on('wa:initialize', async (callback) => {
+    try {
+      console.log(`[QR_FLOW] generate requested (Socket client: ${socket.id})`);
+      console.log(`[QR_FLOW] Current state: ${whatsappService.status}`);
+
+      if (whatsappService.status === 'READY') {
+        if (callback) callback({ success: true, status: 'ready' });
+        return;
+      }
+
+      if (whatsappService.initializationPromise) {
+        console.log('[QR_FLOW] Reusing initialization');
+        await whatsappService.initializationPromise;
+        if (whatsappService.status === 'ERROR') {
+          if (callback) callback({ success: false, error: whatsappService.errorDetails });
+        } else {
+          if (callback) callback({ success: true, status: whatsappService.status });
+        }
+        return;
+      }
+
+      console.log('[QR_FLOW] initialization started');
+      await whatsappService.initialize();
+      
+      if (whatsappService.status === 'ERROR') {
+         if (callback) callback({ success: false, error: whatsappService.errorDetails });
+      } else {
+         if (callback) callback({ success: true, status: whatsappService.status });
+      }
+    } catch (err) {
+       console.error('[QR_FLOW] Error during initialize:', err);
+       if (callback) callback({ success: false, error: err.message });
+    }
   });
 
   socket.on('wa:logout', async () => {

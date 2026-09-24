@@ -10,6 +10,9 @@ class WhatsAppService {
     this.io = null;
     this.errorDetails = null;
     this.groupsPromise = null;
+    this.initializationPromise = null;
+    this.generation = 0;
+    this.groupCache = new Map();
   }
 
   setIo(io) {
@@ -39,12 +42,32 @@ class WhatsAppService {
   }
 
   async initialize() {
-    if (this.status === 'INITIALIZING' || this.status === 'WAITING_QR' || this.status === 'AUTHENTICATING' || this.status === 'READY') {
+    if (this.initializationPromise) {
+      console.log('[WA_INIT] reusing active initialization');
+      return this.initializationPromise;
+    }
+
+    if (this.status === 'WAITING_QR' || this.status === 'AUTHENTICATING' || this.status === 'READY') {
       console.log('[WA] Initialization skipped. Current status is already:', this.status);
       this.emitStatus();
       return;
     }
 
+    this.initializationPromise = this._actuallyInitialize();
+    
+    try {
+      await this.initializationPromise;
+    } finally {
+      // Clear the lock only if it hasn't been overwritten (which shouldn't happen here)
+      if (this.initializationPromise) {
+         this.initializationPromise = null;
+      }
+    }
+  }
+
+  async _actuallyInitialize() {
+    this.generation++;
+    console.log(`[WA_INIT] generation: ${this.generation}`);
     console.log('[WA] Starting initialization process...');
     this.status = 'INITIALIZING';
     this.errorDetails = null;
@@ -128,34 +151,41 @@ class WhatsAppService {
     console.log('[WA] Creating new Client instance...');
     this.client = new Client({
       authStrategy: new LocalAuth(),
-      puppeteer: puppeteerOptions
+      puppeteer: puppeteerOptions,
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+      }
     });
 
     console.log('[WA] Registering event listeners...');
 
     this.client.on('qr', (qr) => {
-      console.log('[WA] QR received');
+      console.log('[QR_FLOW] qr received');
       this.status = 'WAITING_QR';
       this.qrCode = qr;
       this.emitStatus();
+      if (this.io) {
+         this.io.emit('wa:qr', { qr, timestamp: Date.now() });
+      }
     });
 
     this.client.on('authenticated', () => {
-      console.log('[WA] Authenticated');
+      console.log('[QR_FLOW] authenticated');
       this.status = 'AUTHENTICATING';
       this.qrCode = null;
       this.emitStatus();
     });
 
     this.client.on('auth_failure', msg => {
-      console.error('[WA] Auth failure:', msg);
+      console.error('[QR_FLOW] Auth failure:', msg);
       this.status = 'ERROR';
       this.errorDetails = { code: 'AUTH_FAILURE', message: 'Falha na autenticação da sessão.' };
       this.emitStatus();
     });
 
     this.client.on('ready', () => {
-      console.log('[WA] Ready');
+      console.log('[QR_FLOW] ready');
       this.status = 'READY';
       this.qrCode = null;
       this.emitStatus();
@@ -175,17 +205,18 @@ class WhatsAppService {
       await this.client.initialize();
       console.log('[WA] client.initialize() promise resolved (Browser started).');
     } catch (error) {
-      console.error("[WA] CLIENT INITIALIZATION FAILED");
+      console.error("[WA_INIT] FAILED");
       if (error instanceof Error) {
-          console.error("[WA] name:", error.name);
-          console.error("[WA] message:", error.message);
-          console.error("[WA] stack:", error.stack);
+          console.error(`[WA_INIT] Error name: ${error.name}`);
+          console.error(`[WA_INIT] Error message: ${error.message}`);
+          console.error(`[WA_INIT] Error stack: ${error.stack}`);
       } else {
-          console.error("[WA] raw error:", error);
+          console.error(`[WA_INIT] Error message: ${error}`);
       }
       this.status = 'ERROR';
       this.errorDetails = { code: 'INIT_FAILED', message: 'Não foi possível iniciar o serviço de conexão.' };
       this.emitStatus();
+      await this.destroyClient(); // Only destroy this specific instance that failed
     }
   }
 
@@ -220,50 +251,578 @@ class WhatsAppService {
     }
 
     if (this.groupsPromise) {
-      console.log('[GROUPS] Returning existing groups promise');
+      console.log('[GROUPS] Reusing in-flight groups request');
       return this.groupsPromise;
     }
 
     this.groupsPromise = this._actuallyLoadGroups();
     
     try {
-      return await this.groupsPromise;
+      const groups = await this.groupsPromise;
+      // Start background enrichment
+      this._startEnrichment(groups).catch(e => console.error('[GROUPS_DETAILS] Enrichment background error:', e));
+      return groups;
     } finally {
       this.groupsPromise = null;
     }
   }
 
-  async _actuallyLoadGroups() {
-    console.log('[GROUPS] Calling client.getChats()');
-    
+  async getRealParticipantCount(groupId, isDiag) {
+    let pCount = null;
+    let isCommunity = false;
+
     try {
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('getChats timeout after 30000ms')), 30000);
+      if (isDiag) console.log(`\n[ENRICH_DEBUG] START`);
+      if (isDiag) console.log(`[ENRICH_DEBUG] id=${groupId}`);
+      if (isDiag) console.log(`[ENRICH_DEBUG] getChatById starting`);
+      
+      const chat = await this.client.getChatById(groupId);
+      if (isDiag) {
+          console.log(`[ENRICH_DEBUG] getChatById success`);
+          console.log(`[ENRICH_DEBUG] chat constructor=${chat?.constructor?.name}`);
+          console.log(`[ENRICH_DEBUG] isGroup=${chat?.isGroup}`);
+          console.log(`[ENRICH_DEBUG] participants direct=${chat?.participants ? chat.participants.length : 'undefined'}`);
+          console.log(`[ENRICH_DEBUG] metadata=${!!chat?.groupMetadata}`);
+      }
+
+      if (chat && Array.isArray(chat.participants) && chat.participants.length > 0) {
+        pCount = chat.participants.length;
+        isCommunity = chat.isCommunity || false;
+      } else if (chat && chat.groupMetadata && Array.isArray(chat.groupMetadata.participants)) {
+        pCount = chat.groupMetadata.participants.length;
+        isCommunity = chat.isCommunity || false;
+      } else {
+        throw new Error('No participants array found on chat object');
+      }
+    } catch(err) {
+      if (isDiag) {
+         console.log(`[ENRICH_DEBUG] getChatById error`);
+         console.log(`error.name: ${err.name}`);
+         console.log(`error.message: ${err.message}`);
+         console.log(`error.stack: ${err.stack}`);
+      }
+      
+      // Full Fallback
+      try {
+         if (isDiag) console.log(`[ENRICH_DEBUG] fallback starting`);
+         const fallback = await this.client.pupPage.evaluate((gId, diag) => {
+             const result = { found: false, count: null, isCommunity: false, diag: {} };
+             
+             try {
+                if (diag) {
+                    result.diag.windowStore = !!window.Store;
+                    result.diag.windowWWebJS = !!window.WWebJS;
+                    result.diag.windowWAWebCollections = !!window.WAWebCollections;
+                    result.diag.windowRequire = !!window.require;
+                }
+
+                let chatModel = null;
+                let metadataModel = null;
+
+                // Attempt 1: window.Store
+                if (window.Store) {
+                    if (window.Store.Chat) chatModel = window.Store.Chat.get(gId);
+                    if (window.Store.GroupMetadata) metadataModel = window.Store.GroupMetadata.get(gId);
+                }
+
+                // Attempt 2: WAWebCollections
+                if (!chatModel && window.WAWebCollections) {
+                    if (window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
+                    if (window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
+                }
+
+                // Try to extract count
+                if (metadataModel && metadataModel.participants) {
+                    const arr = metadataModel.participants;
+                    result.found = true;
+                    result.count = typeof arr.length === 'number' ? arr.length : (arr._models ? arr._models.length : null);
+                    result.isCommunity = !!metadataModel.isCommunity;
+                } else if (chatModel && chatModel.participants) {
+                    const arr = chatModel.participants;
+                    result.found = true;
+                    result.count = typeof arr.length === 'number' ? arr.length : (arr._models ? arr._models.length : null);
+                    result.isCommunity = !!chatModel.isCommunity;
+                } else if (chatModel && chatModel.groupMetadata && chatModel.groupMetadata.participants) {
+                    const arr = chatModel.groupMetadata.participants;
+                    result.found = true;
+                    result.count = typeof arr.length === 'number' ? arr.length : (arr._models ? arr._models.length : null);
+                    result.isCommunity = !!chatModel.isCommunity;
+                }
+
+                if (diag) {
+                   result.diag.chatModelExists = !!chatModel;
+                   result.diag.metadataModelExists = !!metadataModel;
+                   result.diag.extractedCount = result.count;
+                }
+             } catch(e) {
+                if (diag) result.diag.evalError = e.message;
+             }
+             return result;
+         }, groupId, isDiag);
+         
+         if (isDiag) console.log(`[ENRICH_DEBUG] fallback diag: ${JSON.stringify(fallback.diag)}`);
+         
+         if (fallback && fallback.found && typeof fallback.count === 'number') {
+            pCount = fallback.count;
+            isCommunity = fallback.isCommunity;
+            if (isDiag) console.log(`[ENRICH_DEBUG] fallback success: count=${pCount}`);
+         } else {
+            if (isDiag) console.log(`[ENRICH_DEBUG] fallback failed to find count`);
+         }
+      } catch(e) {
+          if (isDiag) console.log(`[ENRICH_DEBUG] fallback exception: ${e.message}`);
+      }
+    }
+
+    if (isDiag) console.log(`[ENRICH_DEBUG] participant count=${pCount}`);
+    return { pCount, isCommunity };
+  }
+
+  async getRealGroupPhoto(groupId, isDiag) {
+    try {
+      if (isDiag) console.log(`[ENRICH_DEBUG] profilePic starting`);
+      const photoUrl = await this.client.getProfilePicUrl(groupId);
+      if (isDiag) {
+          console.log(`[ENRICH_DEBUG] profilePic result=${photoUrl}`);
+      }
+      return photoUrl || null;
+    } catch(err) {
+      if (isDiag) {
+          console.log(`[ENRICH_DEBUG] profilePic error`);
+          console.log(`error.name: ${err.name}`);
+          console.log(`error.message: ${err.message}`);
+      }
+
+      // Fallback
+      try {
+         if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback starting`);
+         const fallback = await this.client.pupPage.evaluate(async (gId, diag) => {
+             const result = { found: false, url: null, diag: {} };
+             try {
+                let profilePicModule = null;
+                if (window.Store && window.Store.ProfilePic) profilePicModule = window.Store.ProfilePic;
+                else if (window.WAWebCollections && window.WAWebCollections.ProfilePic) profilePicModule = window.WAWebCollections.ProfilePic;
+                
+                if (profilePicModule && typeof profilePicModule.profilePicFind === 'function') {
+                    const res = await profilePicModule.profilePicFind(gId);
+                    result.found = true;
+                    result.url = res ? res.eurl : null;
+                } else if (profilePicModule && typeof profilePicModule.requestProfilePicFromServer === 'function') {
+                    const res = await profilePicModule.requestProfilePicFromServer(gId);
+                    result.found = true;
+                    result.url = res ? res.eurl : null;
+                } else if (window.WWebJS && typeof window.WWebJS.getProfilePicThumb === 'function') {
+                    const res = await window.WWebJS.getProfilePicThumb(gId);
+                    result.found = true;
+                    result.url = res ? res.img : null;
+                }
+                if (diag) result.diag.moduleExists = !!profilePicModule;
+             } catch(e) {
+                 if (diag) result.diag.evalError = e.message;
+             }
+             return result;
+         }, groupId, isDiag);
+         
+         if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback diag: ${JSON.stringify(fallback.diag)}`);
+         
+         if (fallback && fallback.found) {
+            if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback result=${fallback.url}`);
+            return fallback.url || null;
+         }
+      } catch(e) {
+          if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback exception: ${e.message}`);
+      }
+
+      return undefined; // undefined indicates error fetching, null indicates explicitly no photo
+    }
+  }
+
+  async _startEnrichment(groups) {
+    if (!this.client || this.status !== 'READY') return;
+    
+    console.log(`\n========================================`);
+    console.log(`[GROUP_ENRICH] started: ${groups.length}`);
+    console.log(`========================================\n`);
+
+    let enrichedCount = 0;
+    let photosFound = 0;
+    let photosUnavailable = 0;
+    let photosFailed = 0;
+    let participantsLoaded = 0;
+    let participantsFailed = 0;
+    
+    const limit = 3;
+    const active = new Set();
+    let processed = 0;
+
+    for (const group of groups) {
+      if (!this.client || this.status !== 'READY') break;
+
+      const enrichTask = (async () => {
+        const groupId = group.id;
+        processed++;
+        const isDiag = processed <= 3;
+        
+        console.log(`\n[GROUP_ENRICH] ${groupId}`);
+
+        const { pCount, isCommunity } = await this.getRealParticipantCount(groupId, isDiag);
+        if (typeof pCount === 'number') {
+          console.log(`participants: FOUND ${pCount}`);
+          participantsLoaded++;
+        } else {
+          console.log(`participants: ERROR failed to resolve`);
+          participantsFailed++;
+        }
+
+        const photoUrl = await this.getRealGroupPhoto(groupId, isDiag);
+        if (typeof photoUrl === 'string') {
+          console.log(`photo: FOUND`);
+          photosFound++;
+        } else if (photoUrl === null) {
+          console.log(`photo: NO PHOTO`);
+          photosUnavailable++;
+        } else {
+          console.log(`photo: ERROR failed to resolve`);
+          photosFailed++;
+        }
+
+        const enriched = { 
+          id: groupId, 
+          photoUrl: photoUrl || null, 
+          participantCount: pCount,
+          isCommunity,
+          participantStatus: typeof pCount === 'number' ? 'success' : 'failed',
+          photoStatus: typeof photoUrl === 'string' ? 'success' : (photoUrl === null ? 'no_photo' : 'failed')
+        };
+        
+        this.groupCache.set(groupId, enriched);
+        
+        if (isDiag) console.log(`[ENRICH_DEBUG] emitting wa:group_enriched for ${groupId}`);
+        this.io?.emit('wa:group_enriched', enriched);
+        
+        // Emitted log as requested
+        console.log(`[GROUP_ENRICH_SOCKET] emitted id=${groupId}`);
+        console.log(`[GROUP_ENRICH_SOCKET] participants=${pCount}`);
+        console.log(`[GROUP_ENRICH_SOCKET] photo=${typeof photoUrl === 'string'}`);
+
+        if (isDiag) console.log(`[ENRICH_DEBUG] DONE`);
+        
+        enrichedCount++;
+      })();
+
+      active.add(enrichTask);
+      enrichTask.finally(() => active.delete(enrichTask));
+      
+      if (active.size >= limit) {
+        await Promise.race(active);
+      }
+    }
+    
+    await Promise.all(active);
+    
+    console.log(`\n========================================`);
+    console.log(`ARTHURVAULT GROUP ENRICHMENT REPORT`);
+    console.log(`========================================`);
+    console.log(`Groups discovered: ${groups.length}`);
+    console.log(`Groups processed: ${enrichedCount}\n`);
+    console.log(`Participant counts:`);
+    console.log(`FOUND: ${participantsLoaded}`);
+    console.log(`NOT AVAILABLE: 0`);
+    console.log(`ERROR: ${participantsFailed}\n`);
+    console.log(`Photos:`);
+    console.log(`FOUND: ${photosFound}`);
+    console.log(`NO PHOTO: ${photosUnavailable}`);
+    console.log(`ERROR: ${photosFailed}`);
+    console.log(`========================================\n`);
+  }
+
+  async runDiagnostic() {
+    if (!this.client || !this.client.pupPage) {
+      throw new Error('Client or pupPage not ready');
+    }
+    
+    const diag = {
+      status: this.status,
+      getChatsMethod: false,
+      getChatsTotal: 0,
+      storeTotal: 0,
+      storeDiagnostic: {},
+      chatsDiagnostic: {}
+    };
+
+    // 1. Diagnose via getChats
+    try {
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000));
+      const chats = await Promise.race([this.client.getChats(), timeoutPromise]);
+      diag.getChatsMethod = true;
+      diag.getChatsTotal = chats.length;
+      
+      let isGroupTrue = 0, isGroupFalse = 0;
+      const servers = {};
+      const suffixes = {};
+      const constructors = {};
+      const foundGroups = [];
+      
+      for (const chat of chats) {
+         if (chat.isGroup === true) isGroupTrue++;
+         else isGroupFalse++;
+         
+         const srv = (chat.id && chat.id.server) ? chat.id.server : 'undefined';
+         servers[srv] = (servers[srv] || 0) + 1;
+         
+         let sfx = 'other';
+         if (chat.id && chat.id._serialized) {
+           const parts = chat.id._serialized.split('@');
+           if (parts.length > 1) sfx = '@' + parts[1];
+         }
+         suffixes[sfx] = (suffixes[sfx] || 0) + 1;
+         
+         const ctor = chat.constructor ? chat.constructor.name : 'Unknown';
+         constructors[ctor] = (constructors[ctor] || 0) + 1;
+         
+         if ((chat.isGroup === true || srv === 'g.us' || sfx === '@g.us') && foundGroups.length < 5) {
+            foundGroups.push({
+               serialized: chat.id ? chat.id._serialized : null,
+               server: srv,
+               isGroup: chat.isGroup,
+               type: chat.type,
+               name: chat.name,
+               constructorName: ctor
+            });
+         }
+      }
+      
+      diag.chatsDiagnostic = {
+        isGroupTrue,
+        isGroupFalse,
+        servers,
+        suffixes,
+        constructors,
+        foundGroups
+      };
+      
+    } catch (e) {
+      diag.getChatsError = e.message;
+    }
+    
+    // 2. Diagnose via Store Evaluate
+    try {
+      const storeDiag = await this.client.pupPage.evaluate(() => {
+        const res = {
+          storeExists: !!window.Store,
+          chatExists: !!(window.Store && window.Store.Chat),
+          modelsCount: 0,
+          gusCount: 0,
+          lidCount: 0,
+          cusCount: 0,
+          otherCount: 0,
+          sampleGroups: []
+        };
+        if (res.chatExists && typeof window.Store.Chat.getModelsArray === 'function') {
+          const models = window.Store.Chat.getModelsArray();
+          res.modelsCount = models.length;
+          for (const m of models) {
+            const idStr = m.id && m.id._serialized ? m.id._serialized : '';
+            if (idStr.endsWith('@g.us')) res.gusCount++;
+            else if (idStr.endsWith('@lid')) res.lidCount++;
+            else if (idStr.endsWith('@c.us')) res.cusCount++;
+            else res.otherCount++;
+            
+            if (idStr.endsWith('@g.us') && res.sampleGroups.length < 5) {
+              res.sampleGroups.push({
+                serialized: idStr,
+                server: m.id ? m.id.server : undefined,
+                isGroup: m.isGroup,
+                type: m.type,
+                name: m.name || m.formattedTitle,
+                constructorName: m.constructor ? m.constructor.name : 'Unknown'
+              });
+            }
+          }
+        }
+        return res;
+      });
+      diag.storeDiagnostic = storeDiag;
+      diag.storeTotal = storeDiag.modelsCount;
+    } catch (e) {
+      diag.storeError = e.message;
+    }
+
+    return diag;
+  }
+
+  async _getChatsFallback() {
+    console.log('[GROUPS] Starting injected fallback');
+    
+    const fallbackResult = await this.client.pupPage.evaluate(() => {
+      let models = null;
+      let namespace = 'none';
+
+      try {
+        if (window.require) {
+          const WAWebCollections = window.require('WAWebCollections');
+          if (WAWebCollections && WAWebCollections.Chat && typeof WAWebCollections.Chat.getModelsArray === 'function') {
+            models = WAWebCollections.Chat.getModelsArray();
+            namespace = 'WAWebCollections.Chat';
+          }
+        }
+      } catch (e) {
+        // Ignorar erros
+      }
+
+      if (!models) {
+        try {
+          if (window.Store && window.Store.Chat && typeof window.Store.Chat.getModelsArray === 'function') {
+            models = window.Store.Chat.getModelsArray();
+            namespace = 'Store.Chat';
+          }
+        } catch(e) {}
+      }
+
+      if (!models) {
+        try {
+          if (window.WWebJS && typeof window.WWebJS.getChats === 'function') {
+            // WWebJS returns mapped chats, not models
+            models = window.WWebJS.getChats();
+            namespace = 'WWebJS.getChats';
+          }
+        } catch(e) {}
+      }
+
+      if (!models) {
+        return { success: false, namespace: 'none', rawModels: [] };
+      }
+
+      // Extrair apenas o necessário para evitar erros de serialização ("Maximum call stack" ou outros)
+      const rawModels = models.map(c => {
+        let idStr = '';
+        let serverStr = '';
+
+        if (c && c.id) {
+          if (c.id._serialized) idStr = String(c.id._serialized);
+          else if (c.id.user && c.id.server) idStr = `${c.id.user}@${c.id.server}`;
+          serverStr = String(c.id.server || '');
+        }
+
+        let participantCount = 0;
+        if (c.isGroup) {
+          if (c.participants && c.participants.length !== undefined) {
+            participantCount = c.participants.length;
+          } else if (c.groupMetadata && c.groupMetadata.participants) {
+            participantCount = c.groupMetadata.participants.length;
+          }
+        }
+
+        return {
+          id: { _serialized: idStr, server: serverStr },
+          name: c.name || c.formattedTitle || c.contact?.pushname || 'Grupo sem nome',
+          isGroup: !!c.isGroup,
+          type: c.type,
+          participants: { length: participantCount }
+        };
       });
 
-      const chats = await Promise.race([
+      return { success: true, namespace, rawModels };
+    });
+
+    console.log(`[GROUPS] Fallback namespace available: ${fallbackResult.namespace}`);
+    console.log(`[GROUPS] Raw models: ${fallbackResult.rawModels.length}`);
+    
+    if (!fallbackResult.success) {
+      throw new Error('All fallback namespaces failed or returned no data.');
+    }
+    
+    return fallbackResult.rawModels;
+  }
+
+  async _actuallyLoadGroups() {
+    console.log('[GROUPS] Request received');
+    console.log(`[GROUPS] WhatsApp state: ${this.status}`);
+    
+    // Check real WWeb version requested vs loaded
+    try {
+      const waVersion = await this.client.pupPage.evaluate(() => {
+        return window.Debug?.VERSION || 'unknown';
+      });
+      const webVersionCache = this.client.options.webVersionCache || {};
+      console.log(`[WA_VERSION] requested: ${webVersionCache.remotePath || 'default'}`);
+      console.log(`[WA_VERSION] loaded: ${waVersion}`);
+      console.log(`[WA_VERSION] cache type: ${webVersionCache.type || 'none'}`);
+    } catch(e) {}
+
+    let chats = [];
+    
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('getChats timeout after 30000ms')), 30000);
+    });
+
+    console.log('[GROUPS] Primary strategy: client.getChats()');
+    try {
+      chats = await Promise.race([
         this.client.getChats(),
         timeoutPromise
       ]);
-
-      console.log(`[GROUPS] getChats resolved: ${chats.length}`);
-      console.log(`[GROUPS] Total chats returned: ${chats.length}`);
-
-      const groupChats = chats.filter(chat => chat.isGroup === true);
-      console.log(`[GROUPS] Group chats after filter: ${groupChats.length}`);
-
-      const groups = groupChats.map(group => ({
-        id: group.id._serialized,
-        name: group.name,
-        participantsCount: Array.isArray(group.participants) ? group.participants.length : 0
-      }));
-
-      console.log(`[GROUPS] Groups found: ${groups.length}`);
-      return groups;
-    } catch (error) {
-      console.error('[GROUPS] getChats FAILED:', error);
-      throw error;
+      console.log('[GROUPS] Primary strategy succeeded');
+      console.log(`[GROUPS] Chats loaded: ${chats.length}`);
+    } catch (officialError) {
+      console.log(`[GROUPS] Primary failed: ${officialError.message || officialError}`);
+      
+      chats = await this._getChatsFallback();
     }
+
+    // ==========================================
+    // CORREÇÃO DEFINITIVA DE CLASSIFICAÇÃO
+    // ==========================================
+    function getSerializedChatId(chat) {
+      if (typeof chat?.id?._serialized === 'string') {
+        return chat.id._serialized;
+      }
+      if (typeof chat?.id?.user === 'string' && typeof chat?.id?.server === 'string') {
+        return `${chat.id.user}@${chat.id.server}`;
+      }
+      return String(chat?.id || '');
+    }
+
+    function isWhatsAppGroup(chat) {
+      const id = getSerializedChatId(chat);
+      return (
+        id.endsWith('@g.us') ||
+        chat?.id?.server === 'g.us' ||
+        chat?.isGroup === true
+      );
+    }
+
+    let identifiedByGus = 0;
+    
+    const groupChats = chats.filter(chat => {
+      const id = getSerializedChatId(chat);
+      const endsWithGus = id.endsWith('@g.us') || chat?.id?.server === 'g.us';
+      
+      if (endsWithGus) identifiedByGus++;
+      
+      return isWhatsAppGroup(chat);
+    });
+
+    console.log(`[GROUPS] @g.us identified: ${identifiedByGus}`);
+    console.log(`[GROUPS] Groups found: ${groupChats.length}`);
+
+    // Mapeamento extraindo apenas dados reais
+    const mappedGroups = groupChats.map(group => {
+      const id = getSerializedChatId(group);
+      const name = group.name || group.formattedTitle || group.contact?.pushname || 'Grupo sem nome';
+      const participantsCount = Array.isArray(group.participants) ? group.participants.length : (typeof group.participants?.length === 'number' ? group.participants.length : null);
+      return { id, name, participantsCount, participantStatus: 'loading', photoStatus: 'loading' };
+    });
+
+    // Deduplicação exclusiva pelo ID serializado
+    const uniqueGroups = Array.from(
+      new Map(mappedGroups.map(group => [group.id, group])).values()
+    );
+
+    console.log(`[GROUPS] Unique groups: ${uniqueGroups.length}`);
+    console.log(`[GROUPS] Sending groups to frontend: ${uniqueGroups.length}`);
+    
+    return uniqueGroups;
   }
 
   async getGroupParticipants(groupId) {
@@ -272,7 +831,10 @@ class WhatsAppService {
     }
     console.log(`[GROUP] Selected: ${groupId}`);
     const chat = await this.client.getChatById(groupId);
-    if (!chat || !chat.isGroup) {
+    
+    const isGroup = groupId.endsWith('@g.us') || chat?.id?.server === 'g.us' || chat?.isGroup === true;
+    
+    if (!chat || !isGroup) {
       throw new Error('Group not found or not a valid group');
     }
 
