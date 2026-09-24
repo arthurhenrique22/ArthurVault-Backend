@@ -577,6 +577,7 @@ class WhatsAppService {
     console.log(`NO PHOTO: ${photosUnavailable}`);
     console.log(`FAILED: ${photosFailed}`);
     console.log(`========================================\n`);
+  }
 
   async runDiagnostic() {
     if (!this.client || !this.client.pupPage) {

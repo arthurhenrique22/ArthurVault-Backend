@@ -17,8 +17,10 @@ app.use(cors({
 const io = new Server(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST']
-  }
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  transports: ['polling', 'websocket']
 });
 
 whatsappService.setIo(io);
@@ -164,7 +166,7 @@ app.get('/api/group-photo/:groupId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend server running on port ${PORT}`);
   // We can auto-initialize or wait for frontend command
   // whatsappService.initialize();
