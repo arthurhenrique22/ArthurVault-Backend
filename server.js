@@ -164,6 +164,7 @@ io.on('connection', (socket) => {
 
   socket.on('wa:get_groups', async (callback) => {
     try {
+      whatsappService.groupCache.clear(); // Forçar re-enriquecimento ao atualizar
       const groups = await whatsappService.getGroups();
       callback({ success: true, groups });
     } catch (err) {
