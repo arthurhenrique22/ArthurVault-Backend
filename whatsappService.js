@@ -295,12 +295,10 @@ class WhatsAppService {
         throw new Error('No participants array found on chat object');
       }
     } catch(err) {
-      if (isDiag) {
-         console.log(`[ENRICH_DEBUG] getChatById error`);
-         console.log(`error.name: ${err.name}`);
-         console.log(`error.message: ${err.message}`);
-         console.log(`error.stack: ${err.stack}`);
-      }
+      console.log(`\n[PARTICIPANTS_NATIVE_ERROR]`);
+      console.log(`name=${err.name}`);
+      console.log(`message=${err.message}`);
+      console.log(`stack=${err.stack}`);
       
       // Full Fallback
       try {
@@ -370,7 +368,13 @@ class WhatsAppService {
             if (isDiag) console.log(`[ENRICH_DEBUG] fallback failed to find count`);
          }
       } catch(e) {
-          if (isDiag) console.log(`[ENRICH_DEBUG] fallback exception: ${e.message}`);
+          if (isDiag) {
+             console.log(`\n[PARTICIPANTS_FALLBACK_ERROR]`);
+             console.log(`strategy=evaluate`);
+             console.log(`name=${e.name}`);
+             console.log(`message=${e.message}`);
+             console.log(`stack=${e.stack}`);
+          }
       }
     }
 
@@ -387,11 +391,10 @@ class WhatsAppService {
       }
       return photoUrl || null;
     } catch(err) {
-      if (isDiag) {
-          console.log(`[ENRICH_DEBUG] profilePic error`);
-          console.log(`error.name: ${err.name}`);
-          console.log(`error.message: ${err.message}`);
-      }
+      console.log(`\n[PHOTO_NATIVE_ERROR]`);
+      console.log(`name=${err.name}`);
+      console.log(`message=${err.message}`);
+      console.log(`stack=${err.stack}`);
 
       // Fallback
       try {
@@ -430,7 +433,13 @@ class WhatsAppService {
             return fallback.url || null;
          }
       } catch(e) {
-          if (isDiag) console.log(`[ENRICH_DEBUG] profilePic fallback exception: ${e.message}`);
+          if (isDiag) {
+             console.log(`\n[PHOTO_FALLBACK_ERROR]`);
+             console.log(`strategy=evaluate`);
+             console.log(`name=${e.name}`);
+             console.log(`message=${e.message}`);
+             console.log(`stack=${e.stack}`);
+          }
       }
 
       return undefined; // undefined indicates error fetching, null indicates explicitly no photo
@@ -444,96 +453,134 @@ class WhatsAppService {
     console.log(`[GROUP_ENRICH] started: ${groups.length}`);
     console.log(`========================================\n`);
 
-    let enrichedCount = 0;
-    let photosFound = 0;
-    let photosUnavailable = 0;
-    let photosFailed = 0;
-    let participantsLoaded = 0;
-    let participantsFailed = 0;
-    
-    const limit = 3;
-    const active = new Set();
-    let processed = 0;
+    this.groupCache.clear();
+    console.log(`[GROUP_ENRICH] Cache cleared for diagnostic.`);
 
-    for (const group of groups) {
-      if (!this.client || this.status !== 'READY') break;
-
-      const enrichTask = (async () => {
-        const groupId = group.id;
-        processed++;
-        const isDiag = processed <= 3;
-        
-        console.log(`\n[GROUP_ENRICH] ${groupId}`);
-
-        const { pCount, isCommunity } = await this.getRealParticipantCount(groupId, isDiag);
-        if (typeof pCount === 'number') {
-          console.log(`participants: FOUND ${pCount}`);
-          participantsLoaded++;
-        } else {
-          console.log(`participants: ERROR failed to resolve`);
-          participantsFailed++;
-        }
-
-        const photoUrl = await this.getRealGroupPhoto(groupId, isDiag);
-        if (typeof photoUrl === 'string') {
-          console.log(`photo: FOUND`);
-          photosFound++;
-        } else if (photoUrl === null) {
-          console.log(`photo: NO PHOTO`);
-          photosUnavailable++;
-        } else {
-          console.log(`photo: ERROR failed to resolve`);
-          photosFailed++;
-        }
-
-        const enriched = { 
-          id: groupId, 
-          photoUrl: photoUrl || null, 
-          participantCount: pCount,
-          isCommunity,
-          participantStatus: typeof pCount === 'number' ? 'success' : 'failed',
-          photoStatus: typeof photoUrl === 'string' ? 'success' : (photoUrl === null ? 'no_photo' : 'failed')
+    try {
+      const waDiag = await this.client.pupPage.evaluate(() => {
+        return {
+          whatsappVersion: window.Debug?.VERSION ?? null,
+          hasStore: !!window.Store,
+          storeKeys: window.Store ? Object.keys(window.Store).sort() : [],
+          hasWWebJS: !!window.WWebJS,
+          wwebjsKeys: window.WWebJS ? Object.keys(window.WWebJS).sort() : [],
+          hasWAWebCollections: !!window.WAWebCollections,
+          waWebCollectionsKeys: window.WAWebCollections ? Object.keys(window.WAWebCollections).sort() : []
         };
-        
-        this.groupCache.set(groupId, enriched);
-        
-        if (isDiag) console.log(`[ENRICH_DEBUG] emitting wa:group_enriched for ${groupId}`);
-        this.io?.emit('wa:group_enriched', enriched);
-        
-        // Emitted log as requested
-        console.log(`[GROUP_ENRICH_SOCKET] emitted id=${groupId}`);
-        console.log(`[GROUP_ENRICH_SOCKET] participants=${pCount}`);
-        console.log(`[GROUP_ENRICH_SOCKET] photo=${typeof photoUrl === 'string'}`);
-
-        if (isDiag) console.log(`[ENRICH_DEBUG] DONE`);
-        
-        enrichedCount++;
-      })();
-
-      active.add(enrichTask);
-      enrichTask.finally(() => active.delete(enrichTask));
-      
-      if (active.size >= limit) {
-        await Promise.race(active);
-      }
+      });
+      console.log(`========== WA RUNTIME DIAGNOSTIC ==========`);
+      console.log(`whatsapp-web.js package version: 1.34.7`);
+      console.log(`Requested web version cache: 2.2412.54.html`);
+      console.log(`WhatsApp Web version: ${waDiag.whatsappVersion}`);
+      console.log(`Store exists: ${waDiag.hasStore}`);
+      console.log(`Store keys: ${waDiag.storeKeys.join(', ')}`);
+      console.log(`WWebJS exists: ${waDiag.hasWWebJS}`);
+      console.log(`WWebJS keys: ${waDiag.wwebjsKeys.join(', ')}`);
+      console.log(`WAWebCollections exists: ${waDiag.hasWAWebCollections}`);
+      console.log(`WAWebCollections keys: ${waDiag.waWebCollectionsKeys.join(', ')}`);
+      console.log(`===========================================`);
+    } catch(e) {
+      console.log(`Error running WA RUNTIME DIAGNOSTIC: ${e.message}`);
     }
-    
-    await Promise.all(active);
-    
+
+    const diagnosticGroup = groups.find(g => g.id.endsWith('@g.us'));
+    if (!diagnosticGroup) {
+      console.log(`[GROUP_ENRICH] No @g.us group found to test.`);
+      return;
+    }
+
     console.log(`\n========================================`);
-    console.log(`ARTHURVAULT GROUP ENRICHMENT REPORT`);
-    console.log(`========================================`);
-    console.log(`Groups discovered: ${groups.length}`);
-    console.log(`Groups processed: ${enrichedCount}\n`);
-    console.log(`Participant counts:`);
-    console.log(`FOUND: ${participantsLoaded}`);
-    console.log(`NOT AVAILABLE: 0`);
-    console.log(`ERROR: ${participantsFailed}\n`);
-    console.log(`Photos:`);
-    console.log(`FOUND: ${photosFound}`);
-    console.log(`NO PHOTO: ${photosUnavailable}`);
-    console.log(`ERROR: ${photosFailed}`);
+    console.log(`TESTING SINGLE GROUP: ${diagnosticGroup.id}`);
     console.log(`========================================\n`);
+
+    try {
+      const groupModelDiag = await this.client.pupPage.evaluate((gId) => {
+        let model = null;
+        let source = 'none';
+
+        if (window.Store && window.Store.Chat) {
+          model = window.Store.Chat.get(gId);
+          if (model) source = 'Store.Chat';
+        }
+        if (!model && window.WAWebCollections && window.WAWebCollections.Chat) {
+           model = window.WAWebCollections.Chat.get(gId);
+           if (model) source = 'WAWebCollections.Chat';
+        }
+        if (!model && window.WWebJS && typeof window.WWebJS.getChatModel === 'function') {
+           model = window.WWebJS.getChatModel(gId);
+           if (model) source = 'WWebJS.getChatModel';
+        }
+
+        if (!model) {
+           return { source, found: false };
+        }
+
+        return {
+          source,
+          found: true,
+          id: model.id ? model.id._serialized : undefined,
+          constructorName: model.constructor ? model.constructor.name : 'Unknown',
+          ownKeys: Object.keys(model).filter(k => !k.startsWith('_')),
+          prototypeKeys: Object.getOwnPropertyNames(Object.getPrototypeOf(model) || {}),
+          nestedCandidates: {
+             participantsType: typeof model.participants,
+             groupMetadataType: typeof model.groupMetadata,
+             metadataType: typeof model.metadata,
+             contactType: typeof model.contact,
+             profilePicThumbType: typeof model.profilePicThumb
+          }
+        };
+      }, diagnosticGroup.id);
+
+      console.log(`========== REAL GROUP MODEL ==========`);
+      console.log(`SOURCE: ${groupModelDiag.source}`);
+      console.log(`ID: ${groupModelDiag.id}`);
+      console.log(`CONSTRUCTOR: ${groupModelDiag.constructorName}`);
+      console.log(`OWN KEYS: ${groupModelDiag.ownKeys ? groupModelDiag.ownKeys.join(', ') : ''}`);
+      console.log(`PROTOTYPE KEYS: ${groupModelDiag.prototypeKeys ? groupModelDiag.prototypeKeys.join(', ') : ''}`);
+      if (groupModelDiag.nestedCandidates) {
+         console.log(`participants type: ${groupModelDiag.nestedCandidates.participantsType}`);
+         console.log(`groupMetadata type: ${groupModelDiag.nestedCandidates.groupMetadataType}`);
+         console.log(`metadata type: ${groupModelDiag.nestedCandidates.metadataType}`);
+         console.log(`contact type: ${groupModelDiag.nestedCandidates.contactType}`);
+         console.log(`profilePicThumb type: ${groupModelDiag.nestedCandidates.profilePicThumbType}`);
+      }
+      console.log(`======================================`);
+    } catch(e) {
+      console.log(`Error running REAL GROUP MODEL: ${e.message}`);
+    }
+
+    try {
+       const moduleDiscovery = await this.client.pupPage.evaluate(() => {
+          return Object.keys(window.Store || {}).filter(k => /group|participant|chat|contact|profile|pic|wid/i.test(k));
+       });
+       console.log(`[WA_MODULE_DISCOVERY] ${moduleDiscovery.join(', ')}`);
+    } catch(e) {
+       console.log(`Error running WA_MODULE_DISCOVERY: ${e.message}`);
+    }
+
+    console.log(`\nStarting single group extraction for: ${diagnosticGroup.id}`);
+    
+    // Test getRealParticipantCount and getRealGroupPhoto for the FIRST GROUP only for diagnostic!
+    const { pCount, isCommunity } = await this.getRealParticipantCount(diagnosticGroup.id, true);
+    const photoUrl = await this.getRealGroupPhoto(diagnosticGroup.id, true);
+
+    console.log(`\n========== SINGLE GROUP TEST ==========`);
+    console.log(`id=${diagnosticGroup.id}`);
+    console.log(`name=${diagnosticGroup.name}`);
+    console.log(`participantCount=${pCount}`);
+    console.log(`photoUrl=${photoUrl}`);
+    console.log(`=======================================`);
+
+    // Emit to dashboard just to update one card
+    this.io?.emit('wa:group_enriched', {
+       id: diagnosticGroup.id,
+       photoUrl: photoUrl || null,
+       participantCount: pCount,
+       isCommunity,
+       participantStatus: typeof pCount === 'number' ? 'success' : 'failed',
+       photoStatus: typeof photoUrl === 'string' ? 'success' : (photoUrl === null ? 'no_photo' : 'failed')
+    });
   }
 
   async runDiagnostic() {
