@@ -250,80 +250,7 @@ class WhatsAppService {
     return await this.client.getContacts();
   }
 
-  async getGroupParticipants(groupId) {
-    if (this.status !== 'READY' || !this.client) {
-      throw new Error('WhatsApp is not ready');
-    }
 
-    try {
-      const participants = await this.client.pupPage.evaluate(async (gId) => {
-        let parts = null;
-
-        // Try getting participants from Store.Chat
-        let chatModel = null;
-        if (window.Store && window.Store.Chat) chatModel = window.Store.Chat.get(gId);
-        if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
-        if (!chatModel && window.WWebJS && typeof window.WWebJS.getChatModel === 'function') chatModel = window.WWebJS.getChatModel(gId);
-
-        if (chatModel && chatModel.participants) {
-            if (Array.isArray(chatModel.participants)) parts = chatModel.participants;
-            else if (typeof chatModel.participants.getModelsArray === 'function') parts = chatModel.participants.getModelsArray();
-            else if (Array.isArray(chatModel.participants._models)) parts = chatModel.participants._models;
-        } else if (chatModel && chatModel.groupMetadata && chatModel.groupMetadata.participants) {
-            const gp = chatModel.groupMetadata.participants;
-            if (Array.isArray(gp)) parts = gp;
-            else if (typeof gp.getModelsArray === 'function') parts = gp.getModelsArray();
-            else if (Array.isArray(gp._models)) parts = gp._models;
-        }
-
-        if (!parts) {
-            // Try Store.GroupMetadata
-            let metadataModel = null;
-            if (window.Store && window.Store.GroupMetadata) metadataModel = window.Store.GroupMetadata.get(gId);
-            if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
-            if (metadataModel && metadataModel.participants) {
-                const gp = metadataModel.participants;
-                if (Array.isArray(gp)) parts = gp;
-                else if (typeof gp.getModelsArray === 'function') parts = gp.getModelsArray();
-                else if (Array.isArray(gp._models)) parts = gp._models;
-            }
-        }
-
-        if (!parts) return [];
-
-        const ContactStore = window.Store ? window.Store.Contact : (window.WAWebCollections ? window.WAWebCollections.Contact : null);
-
-        return parts.map(p => {
-            const idObj = p.id || {};
-            const serializedId = idObj._serialized || (idObj.user && idObj.server ? `${idObj.user}@${idObj.server}` : null);
-            
-            let name = p.name || p.pushname || p.shortName || p.notifyName || null;
-            let number = serializedId ? serializedId.split('@')[0] : null;
-
-            // Try to find more info in ContactStore
-            if (serializedId && ContactStore && typeof ContactStore.get === 'function') {
-                const contact = ContactStore.get(serializedId);
-                if (contact) {
-                    if (!name) name = contact.name || contact.pushname || contact.shortName || contact.notifyName || null;
-                }
-            }
-
-            return {
-                id: serializedId,
-                number: number,
-                name: name,
-                isAdmin: !!p.isAdmin,
-                isSuperAdmin: !!p.isSuperAdmin
-            };
-        }).filter(p => p.id);
-      }, groupId);
-
-      return participants;
-    } catch (error) {
-      console.error(`[GET_PARTICIPANTS_ERROR] for group ${groupId}:`, error);
-      throw error;
-    }
-  }
 
   async getGroups() {
     console.log('[GROUPS] Request received');
@@ -412,40 +339,7 @@ class WhatsAppService {
         }
     }
 
-    // B) Try getChatById if not found
-    if (typeof participantsCount !== 'number' || participantsCount <= 0) {
-        try {
-            const freshChat = await this.client.getChatById(groupId);
-            if (freshChat) {
-                if (Array.isArray(freshChat.participants)) {
-                    participantsCount = freshChat.participants.length;
-                    participantsSource = 'getChatById.participants';
-                    isCommunity = freshChat.isCommunity || false;
-                } else if (freshChat.groupMetadata && Array.isArray(freshChat.groupMetadata.participants)) {
-                    participantsCount = freshChat.groupMetadata.participants.length;
-                    participantsSource = 'getChatById.groupMetadata';
-                    isCommunity = freshChat.isCommunity || false;
-                } else if (typeof freshChat.participants?.length === 'number') {
-                    participantsCount = freshChat.participants.length;
-                    participantsSource = 'getChatById.participants.length';
-                    isCommunity = freshChat.isCommunity || false;
-                } else if (freshChat.participants && typeof freshChat.participants._models?.length === 'number') {
-                    participantsCount = freshChat.participants._models.length;
-                    participantsSource = 'getChatById.participants._models';
-                    isCommunity = freshChat.isCommunity || false;
-                } else if (freshChat.participants && typeof freshChat.participants.size === 'number') {
-                    participantsCount = freshChat.participants.size;
-                    participantsSource = 'getChatById.participants.size';
-                    isCommunity = freshChat.isCommunity || false;
-                }
-            }
-        } catch(err) {
-            if (isDiag) {
-                console.log(`[PARTICIPANTS_NATIVE_ERROR] strategy=getChatById name=${err.name} message=${err.message}`);
-            }
-        }
-    }
-
+    // B) Try getChatById if not found (REMOVED due to WWebJS crash)
     // C) Try pupPage.evaluate (deep dive)
     if (typeof participantsCount !== 'number' || participantsCount <= 0) {
         try {
@@ -471,7 +365,10 @@ class WhatsAppService {
                 let metadataModel = null;
 
                 if (window.Store && window.Store.Chat) chatModel = window.Store.Chat.get(gId);
-                if (window.Store && window.Store.GroupMetadata) metadataModel = window.Store.GroupMetadata.get(gId);
+                if (window.Store && window.Store.GroupMetadata) {
+                    try { await window.Store.GroupMetadata.update(gId); } catch(e){}
+                    metadataModel = window.Store.GroupMetadata.get(gId);
+                }
 
                 if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
                 if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
@@ -990,52 +887,74 @@ class WhatsAppService {
       throw new Error('WhatsApp is not ready');
     }
     console.log(`[GROUP] Selected: ${groupId}`);
-    const chat = await this.client.getChatById(groupId);
-    
-    const isGroup = groupId.endsWith('@g.us') || chat?.id?.server === 'g.us' || chat?.isGroup === true;
-    
-    if (!chat || !isGroup) {
-      throw new Error('Group not found or not a valid group');
-    }
 
-    console.log(`[GROUP] Participants: ${chat.participants.length}`);
-    const extracted = [];
-    let validCount = 0;
+    try {
+      const participants = await this.client.pupPage.evaluate(async (gId) => {
+        let parts = null;
 
-    // We fetch contacts iteratively to get name and number securely without making too many concurrent requests that might freeze
-    for (const participant of chat.participants) {
-      try {
-        const contact = await this.client.getContactById(participant.id._serialized);
+        let chatModel = null;
+        if (window.Store && window.Store.Chat) chatModel = window.Store.Chat.get(gId);
+        if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
         
-        let number = contact.number;
-        if (!number && contact.id && contact.id.user) {
-          number = contact.id.user;
+        if (chatModel && chatModel.participants) {
+            if (Array.isArray(chatModel.participants)) parts = chatModel.participants;
+            else if (typeof chatModel.participants.getModelsArray === 'function') parts = chatModel.participants.getModelsArray();
+            else if (Array.isArray(chatModel.participants._models)) parts = chatModel.participants._models;
+        } else if (chatModel && chatModel.groupMetadata && chatModel.groupMetadata.participants) {
+            const gp = chatModel.groupMetadata.participants;
+            if (Array.isArray(gp)) parts = gp;
+            else if (typeof gp.getModelsArray === 'function') parts = gp.getModelsArray();
+            else if (Array.isArray(gp._models)) parts = gp._models;
         }
 
-        if (number) {
-          validCount++;
+        if (!parts) {
+            let metadataModel = null;
+            if (window.Store && window.Store.GroupMetadata) {
+                try { await window.Store.GroupMetadata.update(gId); } catch(e){}
+                metadataModel = window.Store.GroupMetadata.get(gId);
+            }
+            if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
+            if (metadataModel && metadataModel.participants) {
+                const gp = metadataModel.participants;
+                if (Array.isArray(gp)) parts = gp;
+                else if (typeof gp.getModelsArray === 'function') parts = gp.getModelsArray();
+                else if (Array.isArray(gp._models)) parts = gp._models;
+            }
         }
 
-        extracted.push({
-          id: contact.id._serialized || participant.id._serialized,
-          number: number || '',
-          name: contact.name || '',
-          pushname: contact.pushname || '',
-          shortName: contact.shortName || ''
-        });
-      } catch (err) {
-         // Fallback if contact fetch fails
-         extracted.push({
-          id: participant.id._serialized,
-          number: participant.id.user || '',
-          name: '',
-          pushname: '',
-          shortName: ''
-        });
-      }
+        if (!parts) return [];
+
+        const ContactStore = window.Store ? window.Store.Contact : (window.WAWebCollections ? window.WAWebCollections.Contact : null);
+
+        return parts.map(p => {
+            const idObj = p.id || {};
+            const serializedId = idObj._serialized || (idObj.user && idObj.server ? `${idObj.user}@${idObj.server}` : null);
+            
+            let name = p.name || p.pushname || p.shortName || p.notifyName || null;
+            let number = serializedId ? serializedId.split('@')[0] : null;
+
+            if (serializedId && ContactStore && typeof ContactStore.get === 'function') {
+                const contact = ContactStore.get(serializedId);
+                if (contact) {
+                    if (!name) name = contact.name || contact.pushname || contact.shortName || contact.notifyName || null;
+                }
+            }
+
+            return {
+                id: serializedId,
+                number: number,
+                name: name,
+                isAdmin: !!p.isAdmin,
+                isSuperAdmin: !!p.isSuperAdmin
+            };
+        }).filter(p => p.id);
+      }, groupId);
+
+      return participants;
+    } catch (error) {
+      console.error(`[GET_PARTICIPANTS_ERROR] for group ${groupId}:`, error);
+      throw error;
     }
-    console.log(`[CONTACTS] Valid numbers: ${validCount}`);
-    return extracted;
   }
 }
 
