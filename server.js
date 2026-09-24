@@ -54,6 +54,51 @@ app.get('/diag', async (req, res) => {
   }
 });
 
+app.get('/diag-deep', async (req, res) => {
+  try {
+    const client = whatsappService.client;
+    if (!client) throw new Error('No client');
+    
+    const chats = await client.getChats();
+    const groups = chats.filter(c => c.isGroup);
+    
+    let results = [];
+    for (let i = 0; i < Math.min(3, groups.length); i++) {
+        const chat = groups[i];
+        let chatDiag = {
+            id: chat.id._serialized,
+            name: chat.name,
+            isGroup: chat.isGroup,
+            isArray: Array.isArray(chat.participants),
+            length: chat.participants?.length,
+            picMethod: typeof chat.getProfilePicUrl
+        };
+        
+        let byIdDiag = {};
+        try {
+            const groupById = await client.getChatById(chat.id._serialized);
+            byIdDiag = {
+                constructor: groupById.constructor?.name,
+                isGroup: groupById.isGroup,
+                isArray: Array.isArray(groupById.participants),
+                length: groupById.participants?.length
+            };
+        } catch(e) { byIdDiag = { error: e.message }; }
+        
+        let picDiag = {};
+        try {
+            const pic = await client.getProfilePicUrl(chat.id._serialized);
+            picDiag = { url: typeof pic === 'string' ? pic.substring(0, 30) : pic };
+        } catch(e) { picDiag = { error: e.message, name: e.name }; }
+        
+        results.push({ chatDiag, byIdDiag, picDiag });
+    }
+    res.json({ success: true, results });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, stack: e.stack });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   
@@ -143,9 +188,11 @@ app.get('/api/group-photo/:groupId', async (req, res) => {
   try {
     const groupId = decodeURIComponent(req.params.groupId);
     // Uses the proxy logic to fetch the image bytes
-    // whatsapp-web.js profile picture usually returns a URL we have to fetch or bytes directly
-    // Let's resolve the URL via our new resolveGroupMetadata or directly getProfilePicUrl
-    const url = await whatsappService.client?.getProfilePicUrl(groupId);
+    const cached = whatsappService.groupCache.get(groupId);
+    let url = cached ? cached.originalPhotoUrl : null;
+    if (!url) {
+        url = await whatsappService.client?.getProfilePicUrl(groupId);
+    }
     if (!url) {
       return res.status(404).send('No photo found');
     }

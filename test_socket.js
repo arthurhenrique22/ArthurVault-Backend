@@ -1,31 +1,37 @@
 const io = require('socket.io-client');
+const fetch = require('node-fetch'); // actually Node 20 has native fetch
 
-const socket = io('https://arthurvault-backend-production.up.railway.app');
-
-socket.on('connect', () => {
-    console.log('Connected to Railway Socket.IO');
-    socket.emit('wa:get_groups', (res) => {
-        console.log(`Initial get_groups returned: ${res?.groups?.length || 0} groups.`);
-        console.log(`Waiting for enriched events...`);
-    });
-});
-
-let enrichedCount = 0;
-const enrichedData = [];
-
-socket.on('wa:group_enriched', (data) => {
-    enrichedCount++;
-    enrichedData.push(data);
-    console.log(`[ENRICHED] ${enrichedCount}: ${data.id} - Participants: ${data.participantsCount} (${data.participantStatus}) - Photo: ${data.photoUrl ? 'YES' : 'NO'} (${data.photoStatus})`);
-
-    if (enrichedCount >= 3) { // Stop after 3 for the report
-        console.log(`\n\n================ REPORT ================`);
-        console.log(JSON.stringify(enrichedData.slice(0, 3), null, 2));
-        process.exit(0);
+async function testPolling() {
+    try {
+        const res = await fetch('https://arthurvault-backend-production.up.railway.app/socket.io/?EIO=4&transport=polling');
+        const text = await res.text();
+        console.log(`[TEST 2] Polling HTTP Status: ${res.status}`);
+        console.log(`[TEST 2] Polling Handshake: ${text.substring(0, 100)}...`);
+    } catch(e) {
+        console.error(`[TEST 2] Failed:`, e.message);
     }
-});
+}
 
-setTimeout(() => {
-    console.log('Timeout waiting for enrichment events.');
-    process.exit(1);
-}, 20000);
+function testSocketClient() {
+    console.log('[TEST 3] Connecting Socket.IO client...');
+    const socket = io('https://arthurvault-backend-production.up.railway.app', {
+        transports: ['polling', 'websocket']
+    });
+
+    socket.on('connect', () => {
+        console.log(`[TEST 3] CONNECTED! Socket ID: ${socket.id}`);
+        process.exit(0);
+    });
+
+    socket.on('connect_error', (err) => {
+        console.error(`[TEST 3] connect_error:`, err.message);
+        process.exit(1);
+    });
+
+    setTimeout(() => {
+        console.error(`[TEST 3] Timeout`);
+        process.exit(1);
+    }, 10000);
+}
+
+testPolling().then(testSocketClient);
