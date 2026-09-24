@@ -343,7 +343,7 @@ class WhatsAppService {
     // C) Try pupPage.evaluate (deep dive)
     if (typeof participantsCount !== 'number' || participantsCount <= 0) {
         try {
-            const fallback = await this.client.pupPage.evaluate((gId) => {
+            const fallback = await this.client.pupPage.evaluate(async (gId) => {
                 let count = null;
                 let isComm = false;
 
