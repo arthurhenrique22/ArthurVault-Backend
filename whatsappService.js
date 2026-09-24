@@ -347,6 +347,71 @@ class WhatsAppService {
                 let count = null;
                 let isComm = false;
 
+                let chatExists = false;
+                let chatSource = 'none';
+                let chatKeys = [];
+                let metadataExists = false;
+                let metadataKeys = [];
+                let participantsExists = false;
+                let participantsType = 'none';
+                let participantsKeys = [];
+
+                let chatModel = null;
+                let metadataModel = null;
+
+                if (window.Store && window.Store.Chat) {
+                    chatModel = window.Store.Chat.get(gId);
+                    if (chatModel) chatSource = 'Store.Chat';
+                }
+                if (window.Store && window.Store.GroupMetadata) {
+                    try { await window.Store.GroupMetadata.update(gId); } catch(e){}
+                    metadataModel = window.Store.GroupMetadata.get(gId);
+                }
+
+                if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) {
+                    chatModel = window.WAWebCollections.Chat.get(gId);
+                    if (chatModel) chatSource = 'WAWebCollections.Chat';
+                }
+                if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) {
+                    metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
+                }
+
+                if (chatModel) {
+                    chatExists = true;
+                    try { chatKeys = Object.keys(chatModel).filter(k => !k.startsWith('_')).slice(0, 10); } catch(e) {}
+                }
+                if (metadataModel) {
+                    metadataExists = true;
+                    try { metadataKeys = Object.keys(metadataModel).filter(k => !k.startsWith('_')).slice(0, 10); } catch(e) {}
+                }
+
+                let pTarget = null;
+                if (metadataModel && metadataModel.participants) pTarget = metadataModel.participants;
+                else if (chatModel && chatModel.participants) pTarget = chatModel.participants;
+                else if (chatModel && chatModel.groupMetadata && chatModel.groupMetadata.participants) pTarget = chatModel.groupMetadata.participants;
+
+                if (pTarget) {
+                    participantsExists = true;
+                    try { participantsKeys = Object.keys(pTarget).filter(k => !k.startsWith('_')).slice(0, 10); } catch(e) {}
+                    if (Array.isArray(pTarget)) participantsType = 'array';
+                    else if (typeof pTarget.getModelsArray === 'function') participantsType = 'collection.getModelsArray()';
+                    else if (Array.isArray(pTarget._models)) participantsType = 'collection._models';
+                    else participantsType = typeof pTarget;
+                }
+
+                if (gId === '120363359964959175@g.us') {
+                    console.log(`\n[GROUP_MODEL_RUNTIME]`);
+                    console.log(`groupId=${gId}`);
+                    console.log(`chatExists=${chatExists}`);
+                    console.log(`chatSource=${chatSource}`);
+                    console.log(`chatKeys=[${chatKeys.join(', ')}]`);
+                    console.log(`metadataExists=${metadataExists}`);
+                    console.log(`metadataKeys=[${metadataKeys.join(', ')}]`);
+                    console.log(`participantsExists=${participantsExists}`);
+                    console.log(`participantsType=${participantsType}`);
+                    console.log(`participantsKeys=[${participantsKeys.join(', ')}]`);
+                }
+
                 const extractSize = (val) => {
                     if (!val) return null;
                     if (Array.isArray(val)) return val.length;
@@ -435,43 +500,85 @@ class WhatsAppService {
         try {
             const fallbackPic = await this.client.pupPage.evaluate(async (gId) => {
                 let profilePicModule = null;
-                if (window.Store && window.Store.ProfilePic) profilePicModule = window.Store.ProfilePic;
-                else if (window.WAWebCollections && window.WAWebCollections.ProfilePic) profilePicModule = window.WAWebCollections.ProfilePic;
-                
-                // Modern Store.ProfilePicThumb
+                let modulesFound = [];
+                let methodsFound = [];
+
+                if (window.Store && window.Store.ProfilePic) {
+                    profilePicModule = window.Store.ProfilePic;
+                    modulesFound.push('Store.ProfilePic');
+                } else if (window.WAWebCollections && window.WAWebCollections.ProfilePic) {
+                    profilePicModule = window.WAWebCollections.ProfilePic;
+                    modulesFound.push('WAWebCollections.ProfilePic');
+                }
+
                 let thumbModule = null;
-                if (window.Store && window.Store.ProfilePicThumb) thumbModule = window.Store.ProfilePicThumb;
-                else if (window.WAWebCollections && window.WAWebCollections.ProfilePicThumb) thumbModule = window.WAWebCollections.ProfilePicThumb;
+                if (window.Store && window.Store.ProfilePicThumb) {
+                    thumbModule = window.Store.ProfilePicThumb;
+                    modulesFound.push('Store.ProfilePicThumb');
+                } else if (window.WAWebCollections && window.WAWebCollections.ProfilePicThumb) {
+                    thumbModule = window.WAWebCollections.ProfilePicThumb;
+                    modulesFound.push('WAWebCollections.ProfilePicThumb');
+                }
+
+                if (window.WWebJS) modulesFound.push('WWebJS');
+                if (window.Store && window.Store.Contact) modulesFound.push('Store.Contact');
+
+                if (thumbModule) {
+                    if (typeof thumbModule.get === 'function') methodsFound.push('thumbModule.get');
+                    if (typeof thumbModule.find === 'function') methodsFound.push('thumbModule.find');
+                }
+                if (profilePicModule) {
+                    if (typeof profilePicModule.profilePicFind === 'function') methodsFound.push('profilePic.profilePicFind');
+                    if (typeof profilePicModule.requestProfilePicFromServer === 'function') methodsFound.push('profilePic.requestProfilePicFromServer');
+                }
+                if (window.WWebJS && typeof window.WWebJS.getProfilePicThumb === 'function') methodsFound.push('WWebJS.getProfilePicThumb');
+
+                let strategySelected = 'none';
+                let resultUrl = null;
 
                 if (thumbModule) {
                     try {
                         let t = thumbModule.get(gId);
-                        if (!t && typeof thumbModule.find === 'function') t = await thumbModule.find(gId);
-                        if (t && t.img) return { url: t.img, source: 'evaluate.ProfilePicThumb.img' };
-                        if (t && t.eurl) return { url: t.eurl, source: 'evaluate.ProfilePicThumb.eurl' };
+                        if (!t && typeof thumbModule.find === 'function') {
+                            t = await thumbModule.find(gId);
+                            strategySelected = 'evaluate.ProfilePicThumb.find';
+                        } else {
+                            strategySelected = 'evaluate.ProfilePicThumb.get';
+                        }
+                        if (t && t.img) resultUrl = t.img;
+                        else if (t && t.eurl) resultUrl = t.eurl;
                     } catch(e) {}
                 }
 
-                if (profilePicModule && typeof profilePicModule.profilePicFind === 'function') {
+                if (!resultUrl && profilePicModule && typeof profilePicModule.profilePicFind === 'function') {
                     const res = await profilePicModule.profilePicFind(gId);
-                    return { url: res ? res.eurl : null, source: 'evaluate.ProfilePic.profilePicFind' };
-                } else if (profilePicModule && typeof profilePicModule.requestProfilePicFromServer === 'function') {
+                    if (res && res.eurl) { resultUrl = res.eurl; strategySelected = 'evaluate.ProfilePic.profilePicFind'; }
+                } 
+                if (!resultUrl && profilePicModule && typeof profilePicModule.requestProfilePicFromServer === 'function') {
                     const res = await profilePicModule.requestProfilePicFromServer(gId);
-                    return { url: res ? res.eurl : null, source: 'evaluate.ProfilePic.requestProfilePicFromServer' };
-                } else if (window.WWebJS && typeof window.WWebJS.getProfilePicThumb === 'function') {
-                    const res = await window.WWebJS.getProfilePicThumb(gId);
-                    return { url: res ? res.img : null, source: 'evaluate.WWebJS.getProfilePicThumb' };
+                    if (res && res.eurl) { resultUrl = res.eurl; strategySelected = 'evaluate.ProfilePic.requestProfilePicFromServer'; }
                 }
-                
-                // Deep fallback: query by contact
-                if (window.Store && window.Store.Contact) {
+                if (!resultUrl && window.WWebJS && typeof window.WWebJS.getProfilePicThumb === 'function') {
+                    const res = await window.WWebJS.getProfilePicThumb(gId);
+                    if (res && res.img) { resultUrl = res.img; strategySelected = 'evaluate.WWebJS.getProfilePicThumb'; }
+                }
+                if (!resultUrl && window.Store && window.Store.Contact) {
                     const contact = window.Store.Contact.get(gId);
                     if (contact && typeof contact.getProfilePicUrl === 'function') {
                         const res = await contact.getProfilePicUrl();
-                        if (res) return { url: res, source: 'evaluate.Contact.getProfilePicUrl' };
+                        if (res) { resultUrl = res; strategySelected = 'evaluate.Contact.getProfilePicUrl'; }
                     }
                 }
-                
+
+                if (gId === '120363359964959175@g.us') {
+                    console.log(`\n[PHOTO_DISCOVERY]`);
+                    console.log(`groupId=${gId}`);
+                    console.log(`modulesFound=[${modulesFound.join(', ')}]`);
+                    console.log(`methodsFound=[${methodsFound.join(', ')}]`);
+                    console.log(`strategySelected=${strategySelected}`);
+                }
+
+                if (resultUrl) return { url: resultUrl, source: strategySelected };
                 return { url: null, source: 'evaluate.failed' };
             }, groupId);
 
