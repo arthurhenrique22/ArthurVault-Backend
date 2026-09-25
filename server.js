@@ -10,17 +10,26 @@ const server = http.createServer(app);
 
 // Setup CORS
 app.use(cors({
-  origin: '*', // For dev. In production, use FRONTEND_URL
-  methods: ['GET', 'POST']
+  origin: function (origin, callback) {
+    // allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    return callback(null, true);
+  },
+  methods: ['GET', 'POST'],
+  credentials: true
 }));
 
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: function(origin, callback) {
+      if (!origin) return callback(null, true);
+      return callback(null, true);
+    },
     methods: ['GET', 'POST'],
     credentials: true
   },
-  transports: ['polling', 'websocket']
+  transports: ['polling', 'websocket'],
+  allowEIO3: true
 });
 
 whatsappService.setIo(io);
@@ -34,86 +43,70 @@ app.get('/api/test-group/:groupId', async (req, res) => {
     const client = whatsappService.client;
     if (!client || !client.pupPage) throw new Error('No client or pupPage');
     
-    const diag = await client.pupPage.evaluate((gId) => {
-       const result = { id: gId };
-       
-       const tryExtract = (obj, name) => {
-           if (!obj) return null;
-           const info = { exists: true, type: typeof obj };
-           try { info.keys = Object.keys(obj).join(', '); } catch(e) {}
-           if (obj.participants) {
-               info.participantsType = typeof obj.participants;
-               if (Array.isArray(obj.participants)) info.participantsLength = obj.participants.length;
-               else if (obj.participants._models) info.participantsModelsLength = obj.participants._models.length;
-               else if (typeof obj.participants.length === 'number') info.participantsLength = obj.participants.length;
-               else if (typeof obj.participants.size === 'number') info.participantsSize = obj.participants.size;
-           }
-           return info;
-       };
-
-       try {
-           if (window.Store && window.Store.Chat) {
-               result.storeChat = tryExtract(window.Store.Chat.get(gId), 'Store.Chat');
-           }
-       } catch(e) { result.storeChatError = e.message; }
-
-       try {
-           if (window.Store && window.Store.GroupMetadata) {
-               result.storeGroupMetadata = tryExtract(window.Store.GroupMetadata.get(gId), 'Store.GroupMetadata');
-           }
-       } catch(e) { result.storeGroupMetadataError = e.message; }
-
-       try {
-           if (window.WAWebCollections && window.WAWebCollections.Chat) {
-               result.collectionsChat = tryExtract(window.WAWebCollections.Chat.get(gId), 'Collections.Chat');
-           }
-       } catch(e) { result.collectionsChatError = e.message; }
+    const diag = await client.pupPage.evaluate(async (gId) => {
+       const result = { id: gId, photoInspection: {} };
        
        try {
-           if (window.WAWebCollections && window.WAWebCollections.GroupMetadata) {
-               result.collectionsGroupMetadata = tryExtract(window.WAWebCollections.GroupMetadata.get(gId), 'Collections.GroupMetadata');
+           // 1. WWebJS Chat & Contact
+           if (window.WWebJS) {
+               result.photoInspection.wwebjsChat = !!window.WWebJS.getChatModel;
+               if (window.WWebJS.getChatModel) {
+                   const chat = window.WWebJS.getChatModel(gId);
+                   result.photoInspection.chatExists = !!chat;
+                   result.photoInspection.chatGetProfilePicUrlType = chat ? typeof chat.getProfilePicUrl : 'N/A';
+               }
+               const contact = window.WWebJS.getContactModel ? window.WWebJS.getContactModel(gId) : null;
+               result.photoInspection.contactExists = !!contact;
+               result.photoInspection.contactGetProfilePicUrlType = contact ? typeof contact.getProfilePicUrl : 'N/A';
            }
-       } catch(e) { result.collectionsGroupMetadataError = e.message; }
-       
-       try {
-           if (window.Store && window.Store.ProfilePic) {
-               const pic = window.Store.ProfilePic.get(gId);
-               if (pic) {
-                   result.profilePicStore = {
-                       keys: Object.keys(pic).join(', '),
-                       eurl: pic.eurl,
-                       previewEurl: pic.previewEurl
-                   };
-               } else {
-                   result.profilePicStore = "Not found";
+
+           // 2. WAWebCollections
+           let WAWebCollections = window.WAWebCollections;
+           if (!WAWebCollections && window.require) {
+               try { WAWebCollections = window.require('WAWebCollections'); } catch(e) {}
+           }
+           let Store = window.Store;
+           if (!Store && window.require) {
+               try { Store = window.require('Store'); } catch(e) {}
+           }
+           
+           const collections = WAWebCollections || Store || {};
+           
+           // ProfilePicThumb
+           if (collections.ProfilePicThumb) {
+               result.photoInspection.ProfilePicThumbCollection = true;
+               const thumb = collections.ProfilePicThumb.get(gId);
+               result.photoInspection.thumbExists = !!thumb;
+               if (thumb) {
+                   result.photoInspection.thumbEurl = thumb.eurl || null;
+                   result.photoInspection.thumbImg = thumb.img || null;
+                   result.photoInspection.thumbId = thumb.id ? thumb.id._serialized : null;
+               }
+           } else {
+               result.photoInspection.ProfilePicThumbCollection = false;
+           }
+
+           // ProfilePic
+           if (collections.ProfilePic) {
+               result.photoInspection.ProfilePicCollection = true;
+               result.photoInspection.ProfilePicRequestFunction = typeof collections.ProfilePic.requestProfilePicFromServer;
+           }
+
+           // Contact
+           if (collections.Contact) {
+               result.photoInspection.ContactCollection = true;
+               const contactObj = collections.Contact.get(gId);
+               result.photoInspection.contactObjExists = !!contactObj;
+               if (contactObj) {
+                   result.photoInspection.contactObjProfilePic = contactObj.profilePicThumbObj ? true : false;
+                   if (contactObj.profilePicThumbObj) {
+                       result.photoInspection.contactObjProfilePicEurl = contactObj.profilePicThumbObj.eurl;
+                   }
                }
            }
-       } catch(e) { result.profilePicStoreError = e.message; }
-       
-       try {
-           if (window.WAWebCollections && window.WAWebCollections.ProfilePic) {
-               const pic = window.WAWebCollections.ProfilePic.get(gId);
-               if (pic) {
-                   result.profilePicCollections = {
-                       keys: Object.keys(pic).join(', '),
-                       eurl: pic.eurl,
-                       previewEurl: pic.previewEurl
-                   };
-               } else {
-                   result.profilePicCollections = "Not found";
-               }
-           }
-       } catch(e) { result.profilePicCollectionsError = e.message; }
-
-       try {
-           if (window.Store && window.Store.GroupMetadata) {
-                const gm = window.Store.GroupMetadata.get(gId);
-                if (gm && gm.participants) {
-                    result.gmParticipantsKeys = Object.keys(gm.participants).join(', ');
-                }
-           }
-       } catch(e) {}
-
+       } catch (e) {
+           result.photoInspection.error = e.message;
+       }
        return result;
     }, groupId);
     
@@ -259,11 +252,19 @@ io.on('connection', (socket) => {
 
   socket.on('wa:get_groups', async (callback) => {
     try {
-      whatsappService.groupCache.clear(); // Forçar re-enriquecimento ao atualizar
       const groups = await whatsappService.getGroups();
       callback({ success: true, groups });
     } catch (err) {
       callback({ success: false, error: err.message });
+    }
+  });
+
+  socket.on('wa:retry_failed_photos', (callback) => {
+    try {
+      const count = whatsappService.retryFailedPhotos();
+      if (callback) callback({ success: true, count });
+    } catch (err) {
+      if (callback) callback({ success: false, error: err.message });
     }
   });
 
@@ -280,26 +281,62 @@ io.on('connection', (socket) => {
     console.log('Client disconnected:', socket.id);
   });
 });
+app.get('/api/groups', (req, res) => {
+  try {
+    const cachedGroups = Array.from(whatsappService.groupCache.values());
+    res.json({ success: true, groups: cachedGroups });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/api/group-photo/:groupId', async (req, res) => {
   try {
     const groupId = decodeURIComponent(req.params.groupId);
-    // Uses the proxy logic to fetch the image bytes
     const cached = whatsappService.groupCache.get(groupId);
     let url = cached ? cached.originalPhotoUrl : null;
-    if (!url) {
-        url = await whatsappService.client?.getProfilePicUrl(groupId);
+    if (!url && whatsappService.status === 'READY') {
+        url = await whatsappService.resolvePhotoOnDemand(groupId);
     }
-    if (!url) {
-      return res.status(404).send('No photo found');
+    if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+      return res.status(404).send('No photo found or invalid URL');
     }
 
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('Failed to fetch image');
+    if (!whatsappService.client || !whatsappService.client.pupPage) {
+        throw new Error('Puppeteer page not available for authenticated fetch');
+    }
+
+    // Fetch the image inside the authenticated Puppeteer context
+    const base64Data = await whatsappService.client.pupPage.evaluate(async (imgUrl) => {
+        try {
+            const res = await fetch(imgUrl);
+            if (!res.ok) return null;
+            const blob = await res.blob();
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve({ dataUrl: reader.result, type: blob.type });
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+        } catch(e) {
+            return null;
+        }
+    }, url);
+
+    if (!base64Data || !base64Data.dataUrl) {
+        throw new Error('Failed to fetch image data through Puppeteer');
+    }
+
+    // Extract base64 and decode
+    const matches = base64Data.dataUrl.match(/^data:(.+);base64,(.+)$/);
+    if (!matches || matches.length !== 3) {
+        throw new Error('Invalid base64 format');
+    }
+
+    const contentType = matches[1];
+    const buffer = Buffer.from(matches[2], 'base64');
     
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    
-    res.set('Content-Type', response.headers.get('content-type') || 'image/jpeg');
+    res.set('Content-Type', contentType);
     res.set('Cache-Control', 'public, max-age=600'); // 10 minute cache
     res.send(buffer);
   } catch (error) {

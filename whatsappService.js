@@ -300,7 +300,7 @@ class WhatsAppService {
   // ==========================================
   // METADATA RESOLVER
   // ==========================================
-  async resolveGroupMetadata(rawGroupId, isDiag) {
+  async resolveGroupMetadata(rawGroupId, isDiag, fetchPhoto = true) {
     const groupId = this.normalizeGroupId(rawGroupId);
     
     let participantsCount = null;
@@ -345,105 +345,99 @@ class WhatsAppService {
         try {
             const fallback = await this.client.pupPage.evaluate(async (gId) => {
                 let count = null;
+                let source = 'none';
                 let isComm = false;
 
-                let chatExists = false;
-                let chatSource = 'none';
-                let chatKeys = [];
-                let metadataExists = false;
-                let metadataKeys = [];
-                let participantsExists = false;
-                let participantsType = 'none';
-                let participantsKeys = [];
-
-                let chatModel = null;
-                let metadataModel = null;
-
-                if (window.Store && window.Store.Chat) {
-                    chatModel = window.Store.Chat.get(gId);
-                    if (chatModel) chatSource = 'Store.Chat';
-                }
-                if (window.Store && window.Store.GroupMetadata) {
-                    try { await window.Store.GroupMetadata.update(gId); } catch(e){}
-                    metadataModel = window.Store.GroupMetadata.get(gId);
-                }
-
-                if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) {
-                    chatModel = window.WAWebCollections.Chat.get(gId);
-                    if (chatModel) chatSource = 'WAWebCollections.Chat';
-                }
-                if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) {
-                    metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
-                }
-
-                if (chatModel) {
-                    chatExists = true;
-                    try { chatKeys = Object.keys(chatModel).filter(k => !k.startsWith('_')).slice(0, 10); } catch(e) {}
-                }
-                if (metadataModel) {
-                    metadataExists = true;
-                    try { metadataKeys = Object.keys(metadataModel).filter(k => !k.startsWith('_')).slice(0, 10); } catch(e) {}
-                }
-
-                let pTarget = null;
-                if (metadataModel && metadataModel.participants) pTarget = metadataModel.participants;
-                else if (chatModel && chatModel.participants) pTarget = chatModel.participants;
-                else if (chatModel && chatModel.groupMetadata && chatModel.groupMetadata.participants) pTarget = chatModel.groupMetadata.participants;
-
-                if (pTarget) {
-                    participantsExists = true;
-                    try { participantsKeys = Object.keys(pTarget).filter(k => !k.startsWith('_')).slice(0, 10); } catch(e) {}
-                    if (Array.isArray(pTarget)) participantsType = 'array';
-                    else if (typeof pTarget.getModelsArray === 'function') participantsType = 'collection.getModelsArray()';
-                    else if (Array.isArray(pTarget._models)) participantsType = 'collection._models';
-                    else participantsType = typeof pTarget;
-                }
-
-                if (gId === '120363359964959175@g.us') {
-                    console.log(`\n[GROUP_MODEL_RUNTIME]`);
-                    console.log(`groupId=${gId}`);
-                    console.log(`chatExists=${chatExists}`);
-                    console.log(`chatSource=${chatSource}`);
-                    console.log(`chatKeys=[${chatKeys.join(', ')}]`);
-                    console.log(`metadataExists=${metadataExists}`);
-                    console.log(`metadataKeys=[${metadataKeys.join(', ')}]`);
-                    console.log(`participantsExists=${participantsExists}`);
-                    console.log(`participantsType=${participantsType}`);
-                    console.log(`participantsKeys=[${participantsKeys.join(', ')}]`);
-                }
-
-                const extractSize = (val) => {
-                    if (!val) return null;
-                    if (Array.isArray(val)) return val.length;
-                    if (typeof val.length === 'number') return val.length;
-                    if (typeof val.size === 'number') return val.size;
-                    if (Array.isArray(val._models)) return val._models.length;
-                    if (Array.isArray(val.models)) return val.models.length;
-                    if (typeof val.getModelsArray === 'function') {
-                        const arr = val.getModelsArray();
+                const tryExtractSize = (obj) => {
+                    if (!obj) return null;
+                    if (Array.isArray(obj)) return obj.length;
+                    if (Array.isArray(obj._models)) return obj._models.length;
+                    if (Array.isArray(obj.models)) return obj.models.length;
+                    if (typeof obj.length === 'number') return obj.length;
+                    if (typeof obj.size === 'number') return obj.size;
+                    if (typeof obj.getModelsArray === 'function') {
+                        const arr = obj.getModelsArray();
                         if (Array.isArray(arr)) return arr.length;
                     }
                     return null;
                 };
 
-                // Removed WWebJS.getChatModel because it expects an internal chat object, not a string ID.
-                if (metadataModel) {
-                    count = extractSize(metadataModel.participants);
-                    isComm = !!metadataModel.isCommunity;
-                    if (typeof count === 'number') return { count, isComm, source: 'evaluate.GroupMetadata' };
-                }
-
-                if (chatModel) {
-                    count = extractSize(chatModel.participants);
-                    isComm = !!chatModel.isCommunity;
-                    if (typeof count === 'number') return { count, isComm, source: 'evaluate.Chat.participants' };
+                const tryGetFromChat = (chatObj, namespace) => {
+                    if (!chatObj) return false;
+                    isComm = !!chatObj.isCommunity;
+                    let c = tryExtractSize(chatObj.participants);
+                    if (c !== null && c > 0) { count = c; source = namespace + '.participants'; return true; }
                     
-                    if (chatModel.groupMetadata) {
-                        count = extractSize(chatModel.groupMetadata.participants);
-                        isComm = !!chatModel.isCommunity;
-                        if (typeof count === 'number') return { count, isComm, source: 'evaluate.Chat.groupMetadata' };
+                    if (chatObj.groupMetadata) {
+                        c = tryExtractSize(chatObj.groupMetadata.participants);
+                        if (c !== null && c > 0) { count = c; source = namespace + '.groupMetadata'; return true; }
                     }
-                }
+                    return false;
+                };
+
+                const tryGetFromGm = (gmObj, namespace) => {
+                    if (!gmObj) return false;
+                    isComm = !!gmObj.isCommunity;
+                    let c = tryExtractSize(gmObj.participants);
+                    if (c !== null && c > 0) { count = c; source = namespace + '.participants'; return true; }
+                    return false;
+                };
+
+                // 1. window.require('WAWebCollections')
+                try {
+                    if (window.require) {
+                        let WAWebCollections;
+                        try { WAWebCollections = window.require('WAWebCollections'); } catch(e) {}
+                        if (WAWebCollections) {
+                            if (WAWebCollections.GroupMetadata) {
+                                if (tryGetFromGm(WAWebCollections.GroupMetadata.get(gId), 'require.WAWebCollections.GroupMetadata')) return { count, isComm, source };
+                            }
+                            if (WAWebCollections.Chat) {
+                                if (tryGetFromChat(WAWebCollections.Chat.get(gId), 'require.WAWebCollections.Chat')) return { count, isComm, source };
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // 2. window.WAWebCollections
+                try {
+                    if (window.WAWebCollections) {
+                        if (window.WAWebCollections.GroupMetadata) {
+                            if (tryGetFromGm(window.WAWebCollections.GroupMetadata.get(gId), 'window.WAWebCollections.GroupMetadata')) return { count, isComm, source };
+                        }
+                        if (window.WAWebCollections.Chat) {
+                            if (tryGetFromChat(window.WAWebCollections.Chat.get(gId), 'window.WAWebCollections.Chat')) return { count, isComm, source };
+                        }
+                    }
+                } catch(e) {}
+
+                // 3. window.require('Store')
+                try {
+                    if (window.require) {
+                        let Store;
+                        try { Store = window.require('Store'); } catch(e) {}
+                        if (Store) {
+                            if (Store.GroupMetadata) {
+                                if (tryGetFromGm(Store.GroupMetadata.get(gId), 'require.Store.GroupMetadata')) return { count, isComm, source };
+                            }
+                            if (Store.Chat) {
+                                if (tryGetFromChat(Store.Chat.get(gId), 'require.Store.Chat')) return { count, isComm, source };
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // 4. window.Store
+                try {
+                    if (window.Store) {
+                        if (window.Store.GroupMetadata) {
+                            if (tryGetFromGm(window.Store.GroupMetadata.get(gId), 'window.Store.GroupMetadata')) return { count, isComm, source };
+                        }
+                        if (window.Store.Chat) {
+                            if (tryGetFromChat(window.Store.Chat.get(gId), 'window.Store.Chat')) return { count, isComm, source };
+                        }
+                    }
+                } catch(e) {}
 
                 return { count: null, isComm: false, source: 'evaluate.failed' };
             }, groupId);
@@ -474,8 +468,9 @@ class WhatsAppService {
 
     // 2. PHOTO
 
-    try {
-        const url = await this.client.getProfilePicUrl(groupId);
+    if (fetchPhoto) {
+        try {
+            const url = await this.client.getProfilePicUrl(groupId);
         if (typeof url === 'string') {
             photoUrl = url;
             photoSource = 'getProfilePicUrl';
@@ -487,86 +482,68 @@ class WhatsAppService {
         
         try {
             const fallbackPic = await this.client.pupPage.evaluate(async (gId) => {
-                let profilePicModule = null;
-                let modulesFound = [];
-                let methodsFound = [];
+                let url = null;
+                let source = 'none';
 
-                if (window.Store && window.Store.ProfilePic) {
-                    profilePicModule = window.Store.ProfilePic;
-                    modulesFound.push('Store.ProfilePic');
-                } else if (window.WAWebCollections && window.WAWebCollections.ProfilePic) {
-                    profilePicModule = window.WAWebCollections.ProfilePic;
-                    modulesFound.push('WAWebCollections.ProfilePic');
-                }
-
-                let thumbModule = null;
-                if (window.Store && window.Store.ProfilePicThumb) {
-                    thumbModule = window.Store.ProfilePicThumb;
-                    modulesFound.push('Store.ProfilePicThumb');
-                } else if (window.WAWebCollections && window.WAWebCollections.ProfilePicThumb) {
-                    thumbModule = window.WAWebCollections.ProfilePicThumb;
-                    modulesFound.push('WAWebCollections.ProfilePicThumb');
-                }
-
-                if (window.WWebJS) modulesFound.push('WWebJS');
-                if (window.Store && window.Store.Contact) modulesFound.push('Store.Contact');
-
-                if (thumbModule) {
-                    if (typeof thumbModule.get === 'function') methodsFound.push('thumbModule.get');
-                    if (typeof thumbModule.find === 'function') methodsFound.push('thumbModule.find');
-                }
-                if (profilePicModule) {
-                    if (typeof profilePicModule.profilePicFind === 'function') methodsFound.push('profilePic.profilePicFind');
-                    if (typeof profilePicModule.requestProfilePicFromServer === 'function') methodsFound.push('profilePic.requestProfilePicFromServer');
-                }
-                if (window.WWebJS && typeof window.WWebJS.getProfilePicThumb === 'function') methodsFound.push('WWebJS.getProfilePicThumb');
-
-                let strategySelected = 'none';
-                let resultUrl = null;
-
-                if (thumbModule) {
-                    try {
-                        let t = thumbModule.get(gId);
-                        if (!t && typeof thumbModule.find === 'function') {
-                            t = await thumbModule.find(gId);
-                            strategySelected = 'evaluate.ProfilePicThumb.find';
-                        } else {
-                            strategySelected = 'evaluate.ProfilePicThumb.get';
-                        }
-                        if (t && t.img) resultUrl = t.img;
-                        else if (t && t.eurl) resultUrl = t.eurl;
-                    } catch(e) {}
-                }
-
-                if (!resultUrl && profilePicModule && typeof profilePicModule.profilePicFind === 'function') {
-                    const res = await profilePicModule.profilePicFind(gId);
-                    if (res && res.eurl) { resultUrl = res.eurl; strategySelected = 'evaluate.ProfilePic.profilePicFind'; }
-                } 
-                if (!resultUrl && profilePicModule && typeof profilePicModule.requestProfilePicFromServer === 'function') {
-                    const res = await profilePicModule.requestProfilePicFromServer(gId);
-                    if (res && res.eurl) { resultUrl = res.eurl; strategySelected = 'evaluate.ProfilePic.requestProfilePicFromServer'; }
-                }
-                if (!resultUrl && window.WWebJS && typeof window.WWebJS.getProfilePicThumb === 'function') {
-                    const res = await window.WWebJS.getProfilePicThumb(gId);
-                    if (res && res.img) { resultUrl = res.img; strategySelected = 'evaluate.WWebJS.getProfilePicThumb'; }
-                }
-                if (!resultUrl && window.Store && window.Store.Contact) {
-                    const contact = window.Store.Contact.get(gId);
-                    if (contact && typeof contact.getProfilePicUrl === 'function') {
-                        const res = await contact.getProfilePicUrl();
-                        if (res) { resultUrl = res; strategySelected = 'evaluate.Contact.getProfilePicUrl'; }
+                // Try WWebJS Contact fallback
+                try {
+                    const chat = window.WWebJS?.getChatModel?.(gId);
+                    if (chat && typeof chat.getProfilePicUrl === 'function') {
+                        const pic = await chat.getProfilePicUrl();
+                        if (pic) return { url: pic, source: 'WWebJS.Chat.getProfilePicUrl' };
                     }
-                }
+                    const contact = window.WWebJS?.getContactModel?.(gId);
+                    if (contact && typeof contact.getProfilePicUrl === 'function') {
+                        const pic = await contact.getProfilePicUrl();
+                        if (pic) return { url: pic, source: 'WWebJS.Contact.getProfilePicUrl' };
+                    }
+                } catch(e) {}
 
-                if (gId === '120363359964959175@g.us') {
-                    console.log(`\n[PHOTO_DISCOVERY]`);
-                    console.log(`groupId=${gId}`);
-                    console.log(`modulesFound=[${modulesFound.join(', ')}]`);
-                    console.log(`methodsFound=[${methodsFound.join(', ')}]`);
-                    console.log(`strategySelected=${strategySelected}`);
-                }
+                // Try WAWebCollections ProfilePicThumb
+                try {
+                    let col = window.WAWebCollections?.ProfilePicThumb || window.Store?.ProfilePicThumb;
+                    if (!col && window.require) {
+                        try { col = window.require('WAWebCollections')?.ProfilePicThumb; } catch(e) {}
+                    }
+                    if (col) {
+                        let pic = col.get(gId);
+                        if (!pic && typeof col.find === 'function') {
+                            pic = await col.find(gId);
+                        }
+                        if (pic && pic.eurl) return { url: pic.eurl, source: 'WAWebCollections.ProfilePicThumb.eurl' };
+                        if (pic && pic.img) return { url: pic.img, source: 'WAWebCollections.ProfilePicThumb.img' };
+                    }
+                } catch(e) {}
 
-                if (resultUrl) return { url: resultUrl, source: strategySelected };
+                // Try WAWebCollections Contact
+                try {
+                    let col = window.WAWebCollections?.Contact || window.Store?.Contact;
+                    if (!col && window.require) {
+                        try { col = window.require('WAWebCollections')?.Contact; } catch(e) {}
+                    }
+                    if (col) {
+                        const contact = col.get(gId);
+                        if (contact && typeof contact.getProfilePicUrl === 'function') {
+                            const pic = await contact.getProfilePicUrl();
+                            if (pic) return { url: pic, source: 'WAWebCollections.Contact.getProfilePicUrl' };
+                        }
+                    }
+                } catch(e) {}
+
+                // Try ProfilePic
+                try {
+                    let col = window.WAWebCollections?.ProfilePic || window.Store?.ProfilePic;
+                    if (!col && window.require) {
+                        try { col = window.require('WAWebCollections')?.ProfilePic; } catch(e) {}
+                    }
+                    if (col) {
+                        if (typeof col.requestProfilePicFromServer === 'function') {
+                            const pic = await col.requestProfilePicFromServer(gId);
+                            if (pic && pic.eurl) return { url: pic.eurl, source: 'WAWebCollections.ProfilePic.request' };
+                        }
+                    }
+                } catch(e) {}
+
                 return { url: null, source: 'evaluate.failed' };
             }, groupId);
 
@@ -592,6 +569,7 @@ class WhatsAppService {
             }
         }
     }
+    }
 
     if (typeof participantsCount === 'number' && participantsCount <= 0) {
         participantsCount = null;
@@ -615,34 +593,38 @@ class WhatsAppService {
     console.log(`[GROUP_ENRICH] started: ${groups.length}`);
     console.log(`========================================\n`);
 
+    this.syncStats = {
+      totalGroups: groups.length,
+      photos: { processed: 0, success: 0, failed: 0, noPhoto: 0, retrying: 0 },
+      participants: { processed: 0, success: 0, failed: 0 },
+      currentGroupId: null
+    };
+    this.emitSyncProgress();
+
     let enrichedCount = 0;
-    let photosFound = 0;
-    let photosUnavailable = 0;
-    let photosFailed = 0;
-    let participantsLoaded = 0;
-    let participantsFailed = 0;
     
-    const limit = 1;
+    const limit = 3;
     const active = new Set();
     let processed = 0;
 
-    const isolatedGroups = groups.filter(g => g.id === '120363359964959175@g.us');
-    if (isolatedGroups.length === 0) {
-        console.log(`[GROUP_ENRICH] Group 120363359964959175@g.us not found in list. Aborting.`);
-        return;
-    }
-    
-    console.log(`[GROUP_ENRICH] Isolating diagnostics. Processing only group: 120363359964959175@g.us`);
-
-    for (const group of isolatedGroups) {
+    for (const group of groups) {
       if (!this.client || this.status !== 'READY') break;
 
       const enrichTask = (async () => {
         processed++;
-        const isDiag = processed <= 3; // Mostrar diagnóstico dos 3 primeiros apenas
+        const isDiag = processed <= 3; 
         const rawGroupId = group.id;
 
-        const result = await this.resolveGroupMetadata(rawGroupId, isDiag);
+        const cached = this.groupCache.get(rawGroupId);
+        if (cached && cached.photoStatus === 'success' && cached.participantStatus === 'success') {
+            this.io?.emit('wa:group_enriched', cached);
+            photosFound++;
+            participantsLoaded++;
+            enrichedCount++;
+            return;
+        }
+
+        const result = await this.resolveGroupMetadata(rawGroupId, isDiag, false);
 
         if (isDiag) {
             console.log(`\n[GROUP_VERIFY]`);
@@ -650,42 +632,35 @@ class WhatsAppService {
             console.log(`id=${result.id}`);
             console.log(`participants=${result.participantsCount}`);
             console.log(`participantsSource=${result.participantsSource}`);
-            console.log(`photo=${typeof result.photoUrl === 'string' ? 'true' : (result.photoUrl === null && result.photoSource !== 'none' ? 'no_photo' : 'false')}`);
-            console.log(`photoSource=${result.photoSource}`);
         }
 
-        const proxyPhotoUrl = result.photoUrl ? `${process.env.PUBLIC_URL || 'https://arthurvault-backend-production.up.railway.app'}/api/group-photo/${encodeURIComponent(result.id)}` : null;
-
+        const participantStatus = typeof result.participantsCount === 'number' ? 'success' : 'failed';
+        
         const enriched = { 
           id: result.id, 
-          photoUrl: proxyPhotoUrl, 
-          originalPhotoUrl: result.photoUrl,
+          photoUrl: null, 
+          originalPhotoUrl: null,
           participantsCount: result.participantsCount,
           isCommunity: result.isCommunity,
-          participantStatus: typeof result.participantsCount === 'number' ? 'success' : 'failed',
-          photoStatus: typeof result.photoUrl === 'string' ? 'success' : (result.photoUrl === null && result.photoSource !== 'none' ? 'no_photo' : 'failed')
+          participantStatus,
+          photoStatus: 'pending',
+          photoAttempts: 0
         };
         
-        if (enriched.participantStatus === 'success' || enriched.photoStatus === 'success' || enriched.photoStatus === 'no_photo') {
+        // Save initial status
+        const existingCache = this.groupCache.get(result.id);
+        if (!existingCache || existingCache.participantStatus !== 'success') {
             this.groupCache.set(result.id, enriched);
+            this.io?.emit('wa:group_enriched', enriched);
         }
+
+        if (participantStatus === 'success') this.syncStats.participants.success++;
+        else this.syncStats.participants.failed++;
+        this.syncStats.participants.processed++;
+        this.emitSyncProgress();
+
+        this._schedulePhotoRetry(result.id, group.name, 1);
         
-        console.log(`\n[GROUP_ENRICH_EMIT]`);
-        console.log(`id=${enriched.id}`);
-        console.log(`participantsCount=${enriched.participantsCount}`);
-        console.log(`participantStatus=${enriched.participantStatus}`);
-        console.log(`photoUrl=${enriched.photoUrl}`);
-        console.log(`photoStatus=${enriched.photoStatus}`);
-
-        this.io?.emit('wa:group_enriched', enriched);
-        
-        if (enriched.participantStatus === 'success') participantsLoaded++;
-        else participantsFailed++;
-
-        if (enriched.photoStatus === 'success') photosFound++;
-        else if (enriched.photoStatus === 'no_photo') photosUnavailable++;
-        else photosFailed++;
-
         enrichedCount++;
       })();
 
@@ -700,20 +675,225 @@ class WhatsAppService {
     await Promise.all(active);
     
     console.log(`\n========================================`);
-    console.log(`ARTHURVAULT GROUP ENRICHMENT REPORT`);
-    console.log(`========================================`);
-    console.log(`WHATSAPP-WEB.JS VERSION: 1.34.7`);
-    console.log(`WEB VERSION REQUESTED: Native default (none forced)`);
-    console.log(`GROUPS DISCOVERED: ${groups.length}`);
-    console.log(`GROUPS ENRICHED: ${enrichedCount}\n`);
-    console.log(`PARTICIPANTS:`);
-    console.log(`SUCCESS: ${participantsLoaded}`);
-    console.log(`FAILED: ${participantsFailed}\n`);
-    console.log(`PHOTOS:`);
-    console.log(`SUCCESS: ${photosFound}`);
-    console.log(`NO PHOTO: ${photosUnavailable}`);
-    console.log(`FAILED: ${photosFailed}`);
+    console.log(`ARTHURVAULT PARTICIPANTS ENRICHMENT FINISHED`);
     console.log(`========================================\n`);
+
+    // Start retry queue processor
+    this._processPhotoRetryQueue();
+  }
+
+  emitSyncProgress() {
+      if (this.io && this.syncStats) {
+          this.io.emit('wa:sync_progress', this.syncStats);
+      }
+  }
+
+  // --- PHOTO RETRY SYSTEM ---
+  
+  photoRetryQueue = [];
+  isProcessingRetries = false;
+
+  _schedulePhotoRetry(groupId, groupName, attempt) {
+      if (attempt > 5) {
+          const cached = this.groupCache.get(groupId);
+          if (cached && cached.photoStatus !== 'success' && cached.photoStatus !== 'no_photo') {
+              cached.photoStatus = 'failed';
+              this.groupCache.set(groupId, cached);
+              this.io?.emit('wa:group_enriched', cached);
+              
+              if (this.syncStats.photos.retrying > 0) this.syncStats.photos.retrying--;
+              this.syncStats.photos.failed++;
+              this.syncStats.photos.processed++;
+              this.emitSyncProgress();
+              
+              console.log(`[PHOTO_QUEUE] group=${groupId} status=failed attempts=5`);
+          }
+          return;
+      }
+      this.photoRetryQueue.push({ groupId, groupName, attempt });
+  }
+
+  async _processPhotoRetryQueue() {
+      if (this.isProcessingRetries) return;
+      this.isProcessingRetries = true;
+      
+      const PHOTO_CONCURRENCY = 2;
+      const RETRY_DELAYS = [0, 3000, 7000, 15000, 30000];
+      
+      console.log(`\n[PHOTO_QUEUE] started total=${this.syncStats.totalGroups} concurrency=${PHOTO_CONCURRENCY}`);
+      
+      const activeTasks = new Set();
+      
+      while (this.photoRetryQueue.length > 0 || activeTasks.size > 0) {
+          if (this.status !== 'READY') break;
+          
+          if (this.photoRetryQueue.length > 0 && activeTasks.size < PHOTO_CONCURRENCY) {
+              const task = this.photoRetryQueue.shift();
+              
+              const p = (async () => {
+                  const { groupId, groupName, attempt } = task;
+                  const cached = this.groupCache.get(groupId);
+                  if (cached && cached.photoStatus === 'success') return;
+                  
+                  if (this.syncStats) {
+                      this.syncStats.currentGroupId = groupId;
+                      if (attempt === 1 && cached && cached.photoStatus === 'pending') {
+                          cached.photoStatus = 'loading';
+                          this.io?.emit('wa:group_enriched', cached);
+                      } else if (attempt > 1 && cached && cached.photoStatus !== 'retrying') {
+                          cached.photoStatus = 'retrying';
+                          this.io?.emit('wa:group_enriched', cached);
+                      }
+                      this.emitSyncProgress();
+                  }
+                  
+                  console.log(`[PHOTO_QUEUE] group=${groupId} attempt=${attempt}`);
+                  
+                  const delay = RETRY_DELAYS[attempt - 1] || 0;
+                  if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+                  
+                  const result = await this.resolveGroupMetadata(groupId, false, true);
+                  
+                  if (typeof result.photoUrl === 'string') {
+                      const isValid = await this.validatePhotoUrl(result.photoUrl);
+                      if (isValid) {
+                          const proxyPhotoUrl = `${process.env.PUBLIC_URL || 'https://arthurvault-backend-production.up.railway.app'}/api/group-photo/${encodeURIComponent(result.id)}?v=${Date.now()}`;
+                          if (cached) {
+                              cached.photoUrl = proxyPhotoUrl;
+                              cached.originalPhotoUrl = result.photoUrl;
+                              cached.photoStatus = 'success';
+                              this.groupCache.set(groupId, cached);
+                              this.io?.emit('wa:group_enriched', cached);
+                          }
+                          if (attempt > 1) this.syncStats.photos.retrying--;
+                          this.syncStats.photos.success++;
+                          this.syncStats.photos.processed++;
+                          this.emitSyncProgress();
+                          console.log(`[PHOTO_QUEUE] group=${groupId} status=success bytes=verified`);
+                      } else {
+                          console.log(`[PHOTO_QUEUE] group=${groupId} status=retrying error="invalid_image_data" nextAttempt=${attempt + 1}`);
+                          if (attempt === 1) {
+                              this.syncStats.photos.retrying++;
+                              this.emitSyncProgress();
+                          }
+                          this._schedulePhotoRetry(groupId, groupName, attempt + 1);
+                      }
+                  } else if (result.photoUrl === null && result.photoSource !== 'none' && result.photoSource !== 'evaluate.failed') {
+                      if (cached) {
+                          cached.photoStatus = 'no_photo';
+                          this.groupCache.set(groupId, cached);
+                          this.io?.emit('wa:group_enriched', cached);
+                      }
+                      if (attempt > 1) this.syncStats.photos.retrying--;
+                      this.syncStats.photos.noPhoto++;
+                      this.syncStats.photos.processed++;
+                      this.emitSyncProgress();
+                      console.log(`[PHOTO_QUEUE] group=${groupId} status=no_photo`);
+                  } else {
+                      console.log(`[PHOTO_QUEUE] group=${groupId} status=retrying nextAttempt=${attempt + 1}`);
+                      if (attempt === 1) {
+                          this.syncStats.photos.retrying++;
+                          this.emitSyncProgress();
+                      }
+                      this._schedulePhotoRetry(groupId, groupName, attempt + 1);
+                  }
+              })();
+              activeTasks.add(p);
+              p.finally(() => activeTasks.delete(p));
+          } else {
+              await Promise.race(activeTasks);
+          }
+      }
+      
+      this.isProcessingRetries = false;
+      if (this.syncStats) {
+          this.syncStats.currentGroupId = null;
+          this.emitSyncProgress();
+      }
+      console.log(`[PHOTO_QUEUE] finished processing`);
+  }
+
+  retryFailedPhotos() {
+      if (!this.syncStats) return;
+      let count = 0;
+      for (const [groupId, cached] of this.groupCache.entries()) {
+          if (cached.photoStatus === 'failed') {
+              cached.photoStatus = 'retrying';
+              this.io?.emit('wa:group_enriched', cached);
+              this._schedulePhotoRetry(groupId, cached.name || 'Unknown', 1);
+              count++;
+          }
+      }
+      if (count > 0) {
+          this.syncStats.photos.failed -= count;
+          this.syncStats.photos.retrying += count;
+          this.syncStats.photos.processed -= count;
+          this.emitSyncProgress();
+          this._processPhotoRetryQueue();
+      }
+      return count;
+  }
+
+  onDemandPhotoLocks = new Map();
+
+  async validatePhotoUrl(url) {
+      if (!this.client || !this.client.pupPage || !url) return false;
+      try {
+          const isValid = await this.client.pupPage.evaluate(async (imgUrl) => {
+              try {
+                  const res = await fetch(imgUrl);
+                  if (!res.ok) return false;
+                  const blob = await res.blob();
+                  return blob.size > 0 && blob.type.startsWith('image/');
+              } catch(e) { return false; }
+          }, url);
+          return !!isValid;
+      } catch(e) {
+          return false;
+      }
+  }
+
+  async resolvePhotoOnDemand(groupId) {
+      if (this.status !== 'READY') return null;
+      
+      const cached = this.groupCache.get(groupId);
+      if (cached && cached.photoStatus === 'success' && cached.originalPhotoUrl) {
+          return cached.originalPhotoUrl;
+      }
+      
+      // Return existing promise if already fetching
+      if (this.onDemandPhotoLocks.has(groupId)) {
+          return this.onDemandPhotoLocks.get(groupId);
+      }
+      
+      console.log(`[PHOTO_ONDEMAND] Requesting robust resolution for id=${groupId}`);
+      const promise = (async () => {
+          try {
+              const result = await this.resolveGroupMetadata(groupId, true, true);
+              if (typeof result.photoUrl === 'string') {
+                  const proxyPhotoUrl = `${process.env.PUBLIC_URL || 'https://arthurvault-backend-production.up.railway.app'}/api/group-photo/${encodeURIComponent(result.id)}?v=${Date.now()}`;
+                  if (cached) {
+                      cached.photoUrl = proxyPhotoUrl;
+                      cached.originalPhotoUrl = result.photoUrl;
+                      cached.photoStatus = 'success';
+                      this.groupCache.set(groupId, cached);
+                      this.io?.emit('wa:group_enriched', cached);
+                  }
+                  console.log(`[PHOTO_ONDEMAND_SUCCESS] id=${groupId}`);
+                  return result.photoUrl;
+              }
+              console.log(`[PHOTO_ONDEMAND_FAILED] id=${groupId} source=${result.photoSource}`);
+              return null;
+          } catch(e) {
+              console.log(`[PHOTO_ONDEMAND_ERROR] id=${groupId} err=${e.message}`);
+              return null;
+          } finally {
+              this.onDemandPhotoLocks.delete(groupId);
+          }
+      })();
+      
+      this.onDemandPhotoLocks.set(groupId, promise);
+      return promise;
   }
 
   async runDiagnostic() {
