@@ -1173,7 +1173,7 @@ class WhatsAppService {
     console.log(`[GROUP] Selected: ${groupId}`);
 
     try {
-      const participants = await this.client.pupPage.evaluate(async (gId) => {
+      const evalPromise = this.client.pupPage.evaluate(async (gId) => {
         let parts = null;
 
         let chatModel = null;
@@ -1197,7 +1197,10 @@ class WhatsAppService {
                 try { await window.Store.GroupMetadata.update(gId); } catch(e){}
                 metadataModel = window.Store.GroupMetadata.get(gId);
             }
-            if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
+            if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) {
+                try { await window.WAWebCollections.GroupMetadata.update(gId); } catch(e){}
+                metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
+            }
             if (metadataModel && metadataModel.participants) {
                 const gp = metadataModel.participants;
                 if (Array.isArray(gp)) parts = gp;
@@ -1234,6 +1237,9 @@ class WhatsAppService {
         }).filter(p => p.id);
       }, groupId);
 
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT: getGroupParticipants')), 15000));
+      const participants = await Promise.race([evalPromise, timeoutPromise]);
+      
       return participants;
     } catch (error) {
       console.error(`[GET_PARTICIPANTS_ERROR] for group ${groupId}:`, error);
