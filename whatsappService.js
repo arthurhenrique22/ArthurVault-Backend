@@ -336,14 +336,7 @@ class WhatsAppService {
                     } catch(e) {}
                 }
 
-                if (window.WWebJS?.getChatModel) {
-                    try {
-                        const wwebChat = window.WWebJS.getChatModel(gId);
-                        if (wwebChat && Array.isArray(wwebChat.participants) && wwebChat.participants.length > 0) {
-                            return { count: wwebChat.participants.length, source: 'WWebJS.participants' };
-                        }
-                    } catch(e) {}
-                }
+                
 
                 return { count: null, source: 'none' };
             } catch (err) {
@@ -386,19 +379,7 @@ class WhatsAppService {
     try {
         const fallbackPic = await this.client.pupPage.evaluate(async (gId) => {
             try {
-                // Try WWebJS Contact fallback
-                try {
-                    const chat = window.WWebJS?.getChatModel?.(gId);
-                    if (chat && typeof chat.getProfilePicUrl === 'function') {
-                        const pic = await chat.getProfilePicUrl();
-                        if (pic) return { url: pic, source: 'WWebJS.Chat.getProfilePicUrl' };
-                    }
-                    const contact = window.WWebJS?.getContactModel?.(gId);
-                    if (contact && typeof contact.getProfilePicUrl === 'function') {
-                        const pic = await contact.getProfilePicUrl();
-                        if (pic) return { url: pic, source: 'WWebJS.Contact.getProfilePicUrl' };
-                    }
-                } catch(e) {}
+                
 
                 // Try WAWebCollections ProfilePicThumb
                 try {
@@ -641,20 +622,7 @@ class WhatsAppService {
                 let url = null;
                 let source = 'none';
 
-                // Try WWebJS Contact fallback
-                try {
-                    const chat = window.WWebJS?.getChatModel?.(gId);
-                    if (chat && typeof chat.getProfilePicUrl === 'function') {
-                        const pic = await chat.getProfilePicUrl();
-                        if (pic) return { url: pic, source: 'WWebJS.Chat.getProfilePicUrl' };
-                    }
-                    const contact = window.WWebJS?.getContactModel?.(gId);
-                    if (contact && typeof contact.getProfilePicUrl === 'function') {
-                        const pic = await contact.getProfilePicUrl();
-                        if (pic) return { url: pic, source: 'WWebJS.Contact.getProfilePicUrl' };
-                    }
-                } catch(e) {}
-
+                // Removed WWebJS Contact fallback
                 // Try WAWebCollections ProfilePicThumb
                 try {
                     let col = window.WAWebCollections?.ProfilePicThumb || window.Store?.ProfilePicThumb;
@@ -1064,7 +1032,7 @@ class WhatsAppService {
 
     try {
         const fetchPromise = this.resolveGroupPhoto(item.id);
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT:resolveGroupMetadata')), 12000));
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT:resolveGroupPhoto')), 12000));
         result = await Promise.race([fetchPromise, timeoutPromise]);
     } catch(err) {
         errMessage = err.message;
