@@ -312,7 +312,7 @@ class WhatsAppService {
                 if (window.Store?.Chat) chatModel = window.Store.Chat.get(gId);
                 if (!chatModel && window.WAWebCollections?.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
                 
-                if (chatModel && Array.isArray(chatModel.participants)) {
+                if (chatModel && Array.isArray(chatModel.participants) && chatModel.participants.length > 0) {
                     return { count: chatModel.participants.length, source: 'Chat.participants.array' };
                 }
                 
@@ -320,7 +320,7 @@ class WhatsAppService {
                 if (window.Store?.GroupMetadata) metadata = window.Store.GroupMetadata.get(gId);
                 if (!metadata && window.WAWebCollections?.GroupMetadata) metadata = window.WAWebCollections.GroupMetadata.get(gId);
                 
-                if (metadata && Array.isArray(metadata.participants)) {
+                if (metadata && Array.isArray(metadata.participants) && metadata.participants.length > 0) {
                     return { count: metadata.participants.length, source: 'GroupMetadata.participants.array' };
                 }
 
@@ -330,7 +330,7 @@ class WhatsAppService {
                     try {
                         await col.update(gId);
                         let updated = col.get(gId);
-                        if (updated && Array.isArray(updated.participants)) {
+                        if (updated && Array.isArray(updated.participants) && updated.participants.length > 0) {
                             return { count: updated.participants.length, source: 'GroupMetadata.update.array' };
                         }
                     } catch(e) {}
@@ -339,7 +339,7 @@ class WhatsAppService {
                 if (window.WWebJS?.getChatModel) {
                     try {
                         const wwebChat = window.WWebJS.getChatModel(gId);
-                        if (wwebChat && Array.isArray(wwebChat.participants)) {
+                        if (wwebChat && Array.isArray(wwebChat.participants) && wwebChat.participants.length > 0) {
                             return { count: wwebChat.participants.length, source: 'WWebJS.participants' };
                         }
                     } catch(e) {}
@@ -886,7 +886,7 @@ class WhatsAppService {
     const RETRY_DELAYS = [0, 3000, 7000, 15000];
     const maxAttempts = RETRY_DELAYS.length;
     
-    if (result && result.status === 'success' && Number.isInteger(result.count) && result.count >= 0) {
+    if (result && result.status === 'success' && Number.isInteger(result.count) && result.count > 0) {
         const cached = this.groupCache.get(item.id) || {};
         cached.participantsCount = result.count;
         cached.participantStatus = 'success';
@@ -1007,7 +1007,7 @@ class WhatsAppService {
   }
 
   async _processPhotoQueue(syncId) {
-    const PHOTO_CONCURRENCY = 3;
+    const PHOTO_CONCURRENCY = 4;
     const activeWorkers = new Set();
     
     while (this.photoSyncId === syncId && this.status === 'READY') {
@@ -1056,10 +1056,7 @@ class WhatsAppService {
     
     item.attempts++;
     item.status = 'loading';
-    console.log(`\n[GROUP_PHOTO]`);
-    console.log(`id=${item.id}`);
-    console.log(`attempt=${item.attempts}`);
-    console.log(`status=loading`);
+    console.log(`[PHOTO_QUEUE] group=${item.id} attempt=${item.attempts}`);
     
     const startMs = Date.now();
     let result = null;
@@ -1485,8 +1482,8 @@ class WhatsAppService {
     const mappedGroups = groupChats.map(group => {
       const id = getSerializedChatId(group);
       const name = group.name || group.formattedTitle || group.contact?.pushname || 'Grupo sem nome';
-      const participantsCount = Array.isArray(group.participants) ? group.participants.length : (typeof group.participants?.length === 'number' ? group.participants.length : null);
-      return { id, name, participantsCount, participantStatus: 'loading', photoStatus: 'loading' };
+      const participantsCount = (Array.isArray(group.participants) && group.participants.length > 0) ? group.participants.length : (typeof group.participants?.length === 'number' && group.participants.length > 0 ? group.participants.length : null);
+      return { id, name, participantsCount, participantStatus: participantsCount ? 'success' : 'pending', photoStatus: 'pending' };
     });
 
     // Deduplicação exclusiva pelo ID serializado
