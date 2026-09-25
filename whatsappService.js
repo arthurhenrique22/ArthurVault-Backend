@@ -250,6 +250,37 @@ class WhatsAppService {
     return await this.client.getContacts();
   }
 
+  async _diagnoseCollections() {
+    if (this._hasDiagnosed) return;
+    this._hasDiagnosed = true;
+    
+    console.log('[WA_STORE_DIAG] Running one-time diagnostic...');
+    const result = await this.client.pupPage.evaluate(() => {
+        const hasStore = !!window.Store;
+        const hasWAW = !!window.WAWebCollections;
+        const hasWidFactory = !!(window.Store?.WidFactory || window.require?.('WidFactory'));
+        
+        let chatCol = 'none';
+        if (window.Store?.Chat) chatCol = 'Store.Chat';
+        else if (window.WAWebCollections?.Chat) chatCol = 'WAWebCollections.Chat';
+        
+        let metaCol = 'none';
+        if (window.Store?.GroupMetadata) metaCol = 'Store.GroupMetadata';
+        else if (window.WAWebCollections?.GroupMetadata) metaCol = 'WAWebCollections.GroupMetadata';
+        
+        let picCol = 'none';
+        if (window.Store?.ProfilePic) picCol = 'Store.ProfilePic';
+        else if (window.WAWebCollections?.ProfilePic) picCol = 'WAWebCollections.ProfilePic';
+        
+        return { hasStore, hasWAW, hasWidFactory, chatCol, metaCol, picCol };
+    });
+    
+    console.log(`[WA_STORE_DIAG] Store=${result.hasStore} WAWebCollections=${result.hasWAW}`);
+    console.log(`[WA_STORE_DIAG] ChatCollection=${result.chatCol}`);
+    console.log(`[WA_STORE_DIAG] GroupMetadata=${result.metaCol}`);
+    console.log(`[WA_STORE_DIAG] ProfilePic=${result.picCol}`);
+    console.log(`[WA_STORE_DIAG] WidFactory=${result.hasWidFactory}`);
+  }
 
 
   async getGroups() {
@@ -269,6 +300,14 @@ class WhatsAppService {
     this.groupsPromise = this._actuallyLoadGroups();
     
     try {
+      if (this.client && this.client.pupPage) {
+          try {
+              await this._diagnoseCollections();
+          } catch(e) {
+              console.error('[DIAGNOSTICS] Failed to run:', e);
+          }
+      }
+
       const groups = await this.groupsPromise;
       // Start background enrichment
       this._startEnrichment(groups).catch(e => console.error('[GROUPS_DETAILS] Photo Enrichment error:', e));
@@ -301,51 +340,110 @@ class WhatsAppService {
   async resolveParticipantsCount(rawGroupId) {
     const groupId = this.normalizeGroupId(rawGroupId);
     const start = Date.now();
+    const isControlGroup = groupId === '120363410917701029@g.us';
     
-    // MISSÃO 3 - Fast Path
-    try {
-        const chat = await this.client.getChatById(groupId);
-        if (chat && Array.isArray(chat.participants) && chat.participants.length > 0) {
-            return {
-                count: chat.participants.length,
-                status: 'success',
-                source: 'client.getChatById.participants',
-                duration: Date.now() - start
-            };
-        }
-    } catch(err) {
-        // Fallthrough
+    let diagLog = null;
+    let controlLog = [];
+    
+    if (isControlGroup) {
+        controlLog.push(`[CONTROL_GROUP] group=${groupId} - starting resolveParticipantsCount`);
     }
 
-    // MISSÃO 4 - Slow Path (Puppeteer fallback)
     try {
-        const fallback = await this.client.pupPage.evaluate(async (gId) => {
+        const fallback = await this.client.pupPage.evaluate(async (gId, isControlGroup) => {
+            let logs = [];
+            let cLog = [];
             try {
-                let metadata = null;
-                if (window.Store?.GroupMetadata) metadata = window.Store.GroupMetadata.get(gId);
-                if (!metadata && window.WAWebCollections?.GroupMetadata) metadata = window.WAWebCollections.GroupMetadata.get(gId);
+                // MISSÃO 2 - Validar o ID Interno
+                let wid = gId;
+                if (window.Store?.WidFactory) {
+                    wid = window.Store.WidFactory.createWid(gId);
+                    if (isControlGroup) cLog.push('WidFactory.createWid successful');
+                } else if (window.require) {
+                    try {
+                        const WidFactory = window.require('WidFactory');
+                        wid = WidFactory.createWid(gId);
+                        if (isControlGroup) cLog.push('require(WidFactory).createWid successful');
+                    } catch(e){}
+                }
+
+                const Store = window.Store || {};
+                const WAW = window.WAWebCollections || {};
                 
+                let metadata = null;
+                let metadataSource = 'none';
+
+                if (Store.GroupMetadata) {
+                    metadata = Store.GroupMetadata.get(wid);
+                    if (metadata) metadataSource = 'Store.GroupMetadata';
+                }
+                if (!metadata && WAW.GroupMetadata) {
+                    metadata = WAW.GroupMetadata.get(wid);
+                    if (metadata) metadataSource = 'WAWebCollections.GroupMetadata';
+                }
+
+                // MISSÃO 5 - Properties Diagnosis for Control Group
+                if (isControlGroup && metadata) {
+                    const keys = Object.keys(metadata);
+                    logs.push(`[GROUP_MODEL_DIAG] id=${gId} source=${metadataSource} keys=${keys.length}`);
+                    if (metadata.participants) logs.push(`[GROUP_MODEL_DIAG] id=${gId} participants=${Array.isArray(metadata.participants) ? 'array' : typeof metadata.participants} length=${metadata.participants.length}`);
+                }
+
+                // MISSÃO 4 - Hydration
                 if (metadata && Array.isArray(metadata.participants) && metadata.participants.length > 0) {
-                    return { count: metadata.participants.length, source: 'GroupMetadata.participants.array' };
+                    if (isControlGroup) cLog.push(`Found ${metadata.participants.length} participants immediately in ${metadataSource}`);
+                    return { count: metadata.participants.length, source: `${metadataSource}.participants`, logs, cLog };
                 }
 
                 // Hydrate
-                const col = window.WAWebCollections?.GroupMetadata || window.Store?.GroupMetadata;
+                const col = WAW.GroupMetadata || Store.GroupMetadata;
                 if (col && typeof col.update === 'function') {
+                    if (isControlGroup) cLog.push(`Attempting GroupMetadata.update(wid)`);
                     try {
-                        await col.update(gId);
-                        let updated = col.get(gId);
+                        await col.update(wid);
+                        // MISSÃO 12 - Wait for model to hydrate
+                        await new Promise(r => setTimeout(r, 1000));
+                        let updated = col.get(wid);
                         if (updated && Array.isArray(updated.participants) && updated.participants.length > 0) {
-                            return { count: updated.participants.length, source: 'GroupMetadata.update.array' };
+                            if (isControlGroup) cLog.push(`Found ${updated.participants.length} participants after update()`);
+                            return { count: updated.participants.length, source: 'GroupMetadata.update.array', logs, cLog };
+                        } else {
+                            if (isControlGroup) cLog.push(`Update() finished but participants still empty/invalid`);
                         }
-                    } catch(e) {}
+                    } catch(e) {
+                        if (isControlGroup) cLog.push(`Update() threw error: ${e.message}`);
+                    }
                 }
 
-                return { count: null, source: 'none' };
+                // Try Chat model fallback
+                let chatModel = null;
+                let chatSource = 'none';
+                if (Store.Chat) {
+                    chatModel = Store.Chat.get(wid);
+                    if (chatModel) chatSource = 'Store.Chat';
+                }
+                if (!chatModel && WAW.Chat) {
+                    chatModel = WAW.Chat.get(wid);
+                    if (chatModel) chatSource = 'WAWebCollections.Chat';
+                }
+
+                if (chatModel && Array.isArray(chatModel.participants) && chatModel.participants.length > 0) {
+                    if (isControlGroup) cLog.push(`Found ${chatModel.participants.length} participants in Chat model`);
+                    return { count: chatModel.participants.length, source: `${chatSource}.participants`, logs, cLog };
+                }
+
+                if (isControlGroup) cLog.push(`All sources exhausted`);
+                return { count: null, source: 'none', logs, cLog };
             } catch (err) {
-                return { count: null, source: 'evaluate.error', error: err.message };
+                if (isControlGroup) cLog.push(`Evaluate threw error: ${err.message}`);
+                return { count: null, source: 'evaluate.error', error: err.message, logs, cLog };
             }
-        }, groupId);
+        }, groupId, isControlGroup);
+
+        if (fallback.logs && fallback.logs.length > 0) fallback.logs.forEach(l => console.log(l));
+        if (fallback.cLog && fallback.cLog.length > 0) {
+            fallback.cLog.forEach(l => console.log(`[CONTROL_GROUP] ${l}`));
+        }
 
         if (fallback && Number.isInteger(fallback.count) && fallback.count > 0) {
             return {
@@ -356,7 +454,7 @@ class WhatsAppService {
             };
         }
     } catch(err) {
-        // Ignored
+        if (isControlGroup) console.log(`[CONTROL_GROUP] Top level try-catch error: ${err.message}`);
     }
 
     return {
@@ -370,11 +468,18 @@ class WhatsAppService {
   async resolveGroupPhoto(rawGroupId) {
     const groupId = this.normalizeGroupId(rawGroupId);
     const start = Date.now();
+    const isControlGroup = groupId === '120363410917701029@g.us';
+    
+    if (isControlGroup) {
+        console.log(`[CONTROL_GROUP] group=${groupId} - starting resolveGroupPhoto`);
+    }
     
     // MISSÃO 8 - Simple Path First
     try {
+        if (isControlGroup) console.log(`[CONTROL_GROUP] Attempting client.getProfilePicUrl()`);
         const url = await this.client.getProfilePicUrl(groupId);
         if (url && typeof url === 'string' && url.startsWith('http')) {
+            if (isControlGroup) console.log(`[CONTROL_GROUP] client.getProfilePicUrl() successful`);
             return {
                 url,
                 status: 'success',
@@ -383,39 +488,62 @@ class WhatsAppService {
             };
         }
     } catch (err) {
-        // Fallthrough
+        if (isControlGroup) console.log(`[CONTROL_GROUP] client.getProfilePicUrl() threw error: ${err.message}`);
     }
 
     // Puppeteer fallback
     try {
-        const fallback = await this.client.pupPage.evaluate(async (gId) => {
+        const fallback = await this.client.pupPage.evaluate(async (gId, isControlGroup) => {
+            let cLog = [];
             try {
-                let Store = window.Store;
-                if (!Store && window.require) { try { Store = window.require('Store'); } catch(e){} }
-                let WAW = window.WAWebCollections;
-                const cols = Store || WAW || {};
+                let wid = gId;
+                if (window.Store?.WidFactory) wid = window.Store.WidFactory.createWid(gId);
+                else if (window.require) { try { wid = window.require('WidFactory').createWid(gId); } catch(e){} }
+
+                let Store = window.Store || {};
+                let WAW = window.WAWebCollections || {};
+                const cols = Object.keys(Store).length > 0 ? Store : WAW;
                 
                 if (cols.ProfilePicThumb) {
-                    const thumb = cols.ProfilePicThumb.get(gId);
-                    if (thumb && thumb.img) return { url: thumb.img, source: 'ProfilePicThumb' };
-                    if (thumb && thumb.eurl) return { url: thumb.eurl, source: 'ProfilePicThumb' };
+                    const thumb = cols.ProfilePicThumb.get(wid);
+                    if (thumb && thumb.img) {
+                        if (isControlGroup) cLog.push('Found via ProfilePicThumb.img');
+                        return { url: thumb.img, source: 'ProfilePicThumb.img', cLog };
+                    }
+                    if (thumb && thumb.eurl) {
+                        if (isControlGroup) cLog.push('Found via ProfilePicThumb.eurl');
+                        return { url: thumb.eurl, source: 'ProfilePicThumb.eurl', cLog };
+                    }
                 }
 
                 if (cols.Contact) {
-                    const c = cols.Contact.get(gId);
-                    if (c && c.profilePicThumbObj && c.profilePicThumbObj.img) return { url: c.profilePicThumbObj.img, source: 'Contact' };
+                    const c = cols.Contact.get(wid);
+                    if (c && c.profilePicThumbObj && c.profilePicThumbObj.img) {
+                        if (isControlGroup) cLog.push('Found via Contact.profilePicThumbObj.img');
+                        return { url: c.profilePicThumbObj.img, source: 'Contact', cLog };
+                    }
                 }
                 
                 if (cols.ProfilePic && typeof cols.ProfilePic.requestProfilePicFromServer === 'function') {
-                    const res = await cols.ProfilePic.requestProfilePicFromServer(gId);
-                    if (res && res.eurl) return { url: res.eurl, source: 'requestProfilePicFromServer' };
+                    if (isControlGroup) cLog.push('Attempting ProfilePic.requestProfilePicFromServer()');
+                    const res = await cols.ProfilePic.requestProfilePicFromServer(wid);
+                    if (res && res.eurl) {
+                        if (isControlGroup) cLog.push('requestProfilePicFromServer successful');
+                        return { url: res.eurl, source: 'requestProfilePicFromServer', cLog };
+                    }
                 }
-                return { url: null, source: 'none' };
+                if (isControlGroup) cLog.push('All photo sources exhausted');
+                return { url: null, source: 'none', cLog };
             } catch(e) {
-                return { url: null, source: 'error' };
+                if (isControlGroup) cLog.push(`Evaluate error: ${e.message}`);
+                return { url: null, source: 'error', cLog };
             }
-        }, groupId);
+        }, groupId, isControlGroup);
         
+        if (fallback.cLog && fallback.cLog.length > 0) {
+            fallback.cLog.forEach(l => console.log(`[CONTROL_GROUP] ${l}`));
+        }
+
         if (fallback && fallback.url) {
             return {
                 url: fallback.url,
@@ -425,7 +553,7 @@ class WhatsAppService {
             };
         }
     } catch(err) {
-        // Ignored
+        if (isControlGroup) console.log(`[CONTROL_GROUP] Top level try-catch error: ${err.message}`);
     }
 
     return {
@@ -436,10 +564,6 @@ class WhatsAppService {
     };
   }
 
-
-  // ==========================================
-  // METADATA RESOLVER
-  // ==========================================
   async resolveGroupMetadata(rawGroupId, isDiag, fetchPhoto = true) {
     const groupId = this.normalizeGroupId(rawGroupId);
     
