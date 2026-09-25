@@ -345,6 +345,99 @@ app.get('/api/group-photo/:groupId', async (req, res) => {
   }
 });
 
+app.get('/api/test-diagnostic', async (req, res) => {
+    try {
+        if (!whatsappService.client || !whatsappService.client.pupPage) {
+            return res.json({ error: 'WhatsApp client not ready or no pupPage' });
+        }
+        
+        const targetGroupId = '120363410917701029@g.us'; // Tropa do 5M
+        
+        const diag = await whatsappService.client.pupPage.evaluate(async (gId) => {
+            const result = {
+                targetGroupId: gId,
+                storeKeys: Object.keys(window.Store || {}),
+                waWebCollectionsKeys: Object.keys(window.WAWebCollections || {}),
+                wwebjsKeys: Object.keys(window.WWebJS || {}),
+                chatModel: null,
+                groupMetadataModel: null,
+            };
+            
+            try {
+                let Store = window.Store;
+                if (!Store && window.require) {
+                    try { Store = window.require('Store'); } catch(e){}
+                }
+                let WAW = window.WAWebCollections;
+                
+                const collections = Store || WAW || {};
+                
+                if (collections.Chat) {
+                    const chat = collections.Chat.get(gId);
+                    if (chat) {
+                        result.chatModel = {
+                            constructorName: chat.constructor ? chat.constructor.name : 'Unknown',
+                            keys: Object.keys(chat),
+                            participantsType: typeof chat.participants,
+                            participantsKeys: chat.participants ? Object.keys(chat.participants) : null,
+                            participantsIsArray: Array.isArray(chat.participants),
+                            participantsModelsIsArray: chat.participants ? Array.isArray(chat.participants.models) : false,
+                            participantsLength: chat.participants ? chat.participants.length : null,
+                            participantsModelsLength: (chat.participants && chat.participants.models) ? chat.participants.models.length : null
+                        };
+                    }
+                }
+                
+                if (collections.GroupMetadata) {
+                    const meta = collections.GroupMetadata.get(gId);
+                    if (meta) {
+                        result.groupMetadataModel = {
+                            constructorName: meta.constructor ? meta.constructor.name : 'Unknown',
+                            keys: Object.keys(meta),
+                            participantsType: typeof meta.participants,
+                            participantsKeys: meta.participants ? Object.keys(meta.participants) : null,
+                            participantsIsArray: Array.isArray(meta.participants),
+                            participantsModelsIsArray: meta.participants ? Array.isArray(meta.participants.models) : false,
+                            participantsLength: meta.participants ? meta.participants.length : null,
+                            participantsModelsLength: (meta.participants && meta.participants.models) ? meta.participants.models.length : null
+                        };
+                    }
+                }
+            } catch(e) {
+                result.error = e.message;
+            }
+            
+            return result;
+        }, targetGroupId);
+        
+        let clientApiChat = null;
+        try {
+            const chatObj = await whatsappService.client.getChatById(targetGroupId);
+            clientApiChat = {
+                exists: !!chatObj,
+                participantsIsArray: chatObj ? Array.isArray(chatObj.participants) : false,
+                participantsLength: chatObj && chatObj.participants ? chatObj.participants.length : null
+            };
+        } catch(e) {
+            clientApiChat = { error: e.message };
+        }
+        
+        let clientApiPhoto = null;
+        try {
+            const url = await whatsappService.client.getProfilePicUrl(targetGroupId);
+            clientApiPhoto = {
+                url: url
+            };
+        } catch(e) {
+            clientApiPhoto = { error: e.message };
+        }
+        
+        return res.json({ diag, clientApiChat, clientApiPhoto });
+    } catch(err) {
+        return res.json({ error: err.message, stack: err.stack });
+    }
+});
+
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend server running on port ${PORT}`);
