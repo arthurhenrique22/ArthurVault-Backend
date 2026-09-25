@@ -28,6 +28,101 @@ whatsappService.setIo(io);
 // Build identifier
 const BUILD_ID = "build-docker-fix-v2";
 
+app.get('/api/test-group/:groupId', async (req, res) => {
+  try {
+    const groupId = decodeURIComponent(req.params.groupId);
+    const client = whatsappService.client;
+    if (!client || !client.pupPage) throw new Error('No client or pupPage');
+    
+    const diag = await client.pupPage.evaluate((gId) => {
+       const result = { id: gId };
+       
+       const tryExtract = (obj, name) => {
+           if (!obj) return null;
+           const info = { exists: true, type: typeof obj };
+           try { info.keys = Object.keys(obj).join(', '); } catch(e) {}
+           if (obj.participants) {
+               info.participantsType = typeof obj.participants;
+               if (Array.isArray(obj.participants)) info.participantsLength = obj.participants.length;
+               else if (obj.participants._models) info.participantsModelsLength = obj.participants._models.length;
+               else if (typeof obj.participants.length === 'number') info.participantsLength = obj.participants.length;
+               else if (typeof obj.participants.size === 'number') info.participantsSize = obj.participants.size;
+           }
+           return info;
+       };
+
+       try {
+           if (window.Store && window.Store.Chat) {
+               result.storeChat = tryExtract(window.Store.Chat.get(gId), 'Store.Chat');
+           }
+       } catch(e) { result.storeChatError = e.message; }
+
+       try {
+           if (window.Store && window.Store.GroupMetadata) {
+               result.storeGroupMetadata = tryExtract(window.Store.GroupMetadata.get(gId), 'Store.GroupMetadata');
+           }
+       } catch(e) { result.storeGroupMetadataError = e.message; }
+
+       try {
+           if (window.WAWebCollections && window.WAWebCollections.Chat) {
+               result.collectionsChat = tryExtract(window.WAWebCollections.Chat.get(gId), 'Collections.Chat');
+           }
+       } catch(e) { result.collectionsChatError = e.message; }
+       
+       try {
+           if (window.WAWebCollections && window.WAWebCollections.GroupMetadata) {
+               result.collectionsGroupMetadata = tryExtract(window.WAWebCollections.GroupMetadata.get(gId), 'Collections.GroupMetadata');
+           }
+       } catch(e) { result.collectionsGroupMetadataError = e.message; }
+       
+       try {
+           if (window.Store && window.Store.ProfilePic) {
+               const pic = window.Store.ProfilePic.get(gId);
+               if (pic) {
+                   result.profilePicStore = {
+                       keys: Object.keys(pic).join(', '),
+                       eurl: pic.eurl,
+                       previewEurl: pic.previewEurl
+                   };
+               } else {
+                   result.profilePicStore = "Not found";
+               }
+           }
+       } catch(e) { result.profilePicStoreError = e.message; }
+       
+       try {
+           if (window.WAWebCollections && window.WAWebCollections.ProfilePic) {
+               const pic = window.WAWebCollections.ProfilePic.get(gId);
+               if (pic) {
+                   result.profilePicCollections = {
+                       keys: Object.keys(pic).join(', '),
+                       eurl: pic.eurl,
+                       previewEurl: pic.previewEurl
+                   };
+               } else {
+                   result.profilePicCollections = "Not found";
+               }
+           }
+       } catch(e) { result.profilePicCollectionsError = e.message; }
+
+       try {
+           if (window.Store && window.Store.GroupMetadata) {
+                const gm = window.Store.GroupMetadata.get(gId);
+                if (gm && gm.participants) {
+                    result.gmParticipantsKeys = Object.keys(gm.participants).join(', ');
+                }
+           }
+       } catch(e) {}
+
+       return result;
+    }, groupId);
+    
+    res.json({ success: true, diag });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, stack: e.stack });
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
