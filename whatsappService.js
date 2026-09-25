@@ -426,18 +426,6 @@ class WhatsAppService {
                     return null;
                 };
 
-                let chatModel = null;
-                let metadataModel = null;
-
-                if (window.Store && window.Store.Chat) chatModel = window.Store.Chat.get(gId);
-                if (window.Store && window.Store.GroupMetadata) {
-                    try { await window.Store.GroupMetadata.update(gId); } catch(e){}
-                    metadataModel = window.Store.GroupMetadata.get(gId);
-                }
-
-                if (!chatModel && window.WAWebCollections && window.WAWebCollections.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
-                if (!metadataModel && window.WAWebCollections && window.WAWebCollections.GroupMetadata) metadataModel = window.WAWebCollections.GroupMetadata.get(gId);
-
                 // Removed WWebJS.getChatModel because it expects an internal chat object, not a string ID.
                 if (metadataModel) {
                     count = extractSize(metadataModel.participants);
