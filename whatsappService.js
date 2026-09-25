@@ -300,22 +300,27 @@ class WhatsAppService {
 
   async resolveParticipantsCount(rawGroupId) {
     const groupId = this.normalizeGroupId(rawGroupId);
+    const start = Date.now();
     
-    let count = null;
-    let source = 'none';
-    let error = null;
+    // MISSÃO 3 - Fast Path
+    try {
+        const chat = await this.client.getChatById(groupId);
+        if (chat && Array.isArray(chat.participants) && chat.participants.length > 0) {
+            return {
+                count: chat.participants.length,
+                status: 'success',
+                source: 'client.getChatById.participants',
+                duration: Date.now() - start
+            };
+        }
+    } catch(err) {
+        // Fallthrough
+    }
 
+    // MISSÃO 4 - Slow Path (Puppeteer fallback)
     try {
         const fallback = await this.client.pupPage.evaluate(async (gId) => {
             try {
-                let chatModel = null;
-                if (window.Store?.Chat) chatModel = window.Store.Chat.get(gId);
-                if (!chatModel && window.WAWebCollections?.Chat) chatModel = window.WAWebCollections.Chat.get(gId);
-                
-                if (chatModel && Array.isArray(chatModel.participants) && chatModel.participants.length > 0) {
-                    return { count: chatModel.participants.length, source: 'Chat.participants.array' };
-                }
-                
                 let metadata = null;
                 if (window.Store?.GroupMetadata) metadata = window.Store.GroupMetadata.get(gId);
                 if (!metadata && window.WAWebCollections?.GroupMetadata) metadata = window.WAWebCollections.GroupMetadata.get(gId);
@@ -324,7 +329,7 @@ class WhatsAppService {
                     return { count: metadata.participants.length, source: 'GroupMetadata.participants.array' };
                 }
 
-                // If exists but no participants, try to hydrate
+                // Hydrate
                 const col = window.WAWebCollections?.GroupMetadata || window.Store?.GroupMetadata;
                 if (col && typeof col.update === 'function') {
                     try {
@@ -336,101 +341,99 @@ class WhatsAppService {
                     } catch(e) {}
                 }
 
-                
-
                 return { count: null, source: 'none' };
             } catch (err) {
                 return { count: null, source: 'evaluate.error', error: err.message };
             }
         }, groupId);
 
-        if (fallback && Number.isInteger(fallback.count) && fallback.count >= 0) {
-            count = fallback.count;
-            source = fallback.source;
-        } else if (fallback && fallback.error) {
-            error = fallback.error;
+        if (fallback && Number.isInteger(fallback.count) && fallback.count > 0) {
+            return {
+                count: fallback.count,
+                status: 'success',
+                source: fallback.source,
+                duration: Date.now() - start
+            };
         }
     } catch(err) {
-        error = err.message;
-        source = 'pupPage.error';
+        // Ignored
     }
 
     return {
-        count: Number.isInteger(count) && count >= 0 ? count : null,
-        status: Number.isInteger(count) && count >= 0 ? 'success' : 'failed',
-        source,
-        error
+        count: null,
+        status: 'failed',
+        source: 'none',
+        duration: Date.now() - start
     };
   }
 
   async resolveGroupPhoto(rawGroupId) {
     const groupId = this.normalizeGroupId(rawGroupId);
+    const start = Date.now();
     
-    let photoUrl = null;
-    let source = 'none';
-
+    // MISSÃO 8 - Simple Path First
     try {
         const url = await this.client.getProfilePicUrl(groupId);
-        if (typeof url === 'string' && url.length > 0) {
-            return { url, source: 'getProfilePicUrl', status: 'success' };
+        if (url && typeof url === 'string' && url.startsWith('http')) {
+            return {
+                url,
+                status: 'success',
+                source: 'getProfilePicUrl',
+                duration: Date.now() - start
+            };
         }
-    } catch(err) {}
+    } catch (err) {
+        // Fallthrough
+    }
 
+    // Puppeteer fallback
     try {
-        const fallbackPic = await this.client.pupPage.evaluate(async (gId) => {
+        const fallback = await this.client.pupPage.evaluate(async (gId) => {
             try {
+                let Store = window.Store;
+                if (!Store && window.require) { try { Store = window.require('Store'); } catch(e){} }
+                let WAW = window.WAWebCollections;
+                const cols = Store || WAW || {};
                 
+                if (cols.ProfilePicThumb) {
+                    const thumb = cols.ProfilePicThumb.get(gId);
+                    if (thumb && thumb.img) return { url: thumb.img, source: 'ProfilePicThumb' };
+                    if (thumb && thumb.eurl) return { url: thumb.eurl, source: 'ProfilePicThumb' };
+                }
 
-                // Try WAWebCollections ProfilePicThumb
-                try {
-                    let col = window.WAWebCollections?.ProfilePicThumb || window.Store?.ProfilePicThumb;
-                    if (col) {
-                        let pic = col.get(gId);
-                        if (!pic && typeof col.find === 'function') {
-                            pic = await col.find(gId);
-                        }
-                        if (pic && pic.eurl) return { url: pic.eurl, source: 'WAWebCollections.ProfilePicThumb.eurl' };
-                        if (pic && pic.img) return { url: pic.img, source: 'WAWebCollections.ProfilePicThumb.img' };
-                    }
-                } catch(e) {}
-
-                // Try WAWebCollections Contact
-                try {
-                    let col = window.WAWebCollections?.Contact || window.Store?.Contact;
-                    if (col) {
-                        const contact = col.get(gId);
-                        if (contact && typeof contact.getProfilePicUrl === 'function') {
-                            const pic = await contact.getProfilePicUrl();
-                            if (pic) return { url: pic, source: 'WAWebCollections.Contact.getProfilePicUrl' };
-                        }
-                    }
-                } catch(e) {}
-
-                // Try ProfilePic
-                try {
-                    let col = window.WAWebCollections?.ProfilePic || window.Store?.ProfilePic;
-                    if (col) {
-                        if (typeof col.requestProfilePicFromServer === 'function') {
-                            const pic = await col.requestProfilePicFromServer(gId);
-                            if (pic && pic.eurl) return { url: pic.eurl, source: 'WAWebCollections.ProfilePic.request' };
-                        }
-                    }
-                } catch(e) {}
-
-                return { url: null, source: 'evaluate.no_photo' };
+                if (cols.Contact) {
+                    const c = cols.Contact.get(gId);
+                    if (c && c.profilePicThumbObj && c.profilePicThumbObj.img) return { url: c.profilePicThumbObj.img, source: 'Contact' };
+                }
+                
+                if (cols.ProfilePic && typeof cols.ProfilePic.requestProfilePicFromServer === 'function') {
+                    const res = await cols.ProfilePic.requestProfilePicFromServer(gId);
+                    if (res && res.eurl) return { url: res.eurl, source: 'requestProfilePicFromServer' };
+                }
+                return { url: null, source: 'none' };
             } catch(e) {
-                return { url: null, source: 'evaluate.error' };
+                return { url: null, source: 'error' };
             }
         }, groupId);
-
-        if (fallbackPic && typeof fallbackPic.url === 'string' && fallbackPic.url.length > 0) {
-            return { url: fallbackPic.url, source: fallbackPic.source, status: 'success' };
-        } else if (fallbackPic && fallbackPic.source === 'evaluate.no_photo') {
-            return { url: null, source: fallbackPic.source, status: 'no_photo' };
+        
+        if (fallback && fallback.url) {
+            return {
+                url: fallback.url,
+                status: 'success',
+                source: fallback.source,
+                duration: Date.now() - start
+            };
         }
-    } catch(err) {}
+    } catch(err) {
+        // Ignored
+    }
 
-    return { url: null, source: 'failed', status: 'failed' };
+    return {
+        url: null,
+        status: 'failed',
+        source: 'none',
+        duration: Date.now() - start
+    };
   }
 
 
@@ -734,9 +737,14 @@ class WhatsAppService {
   async _startParticipantEnrichment(groups) {
     if (!this.client || this.status !== 'READY') return;
 
-    const participantGroups = groups.filter(
+    let participantGroups = groups.filter(
         group => typeof group.id === 'string' && group.id.endsWith('@g.us')
     );
+
+    // TEMP TEST WITH 5 GROUPS + TROPA DO 5M
+    const tropa = participantGroups.find(g => g.id === '120363410917701029@g.us');
+    participantGroups = participantGroups.slice(0, 5);
+    if (tropa && !participantGroups.find(g => g.id === tropa.id)) participantGroups.push(tropa);
 
     const crypto = require('crypto');
     this.participantSyncId = crypto.randomUUID();
@@ -851,8 +859,8 @@ class WhatsAppService {
 
     if (this.participantSyncId !== syncId) return;
 
-    const RETRY_DELAYS = [0, 3000, 7000, 15000];
-    const maxAttempts = RETRY_DELAYS.length;
+    const RETRY_DELAYS = [0, 1000, 2000, 4000, 8000];
+    const maxAttempts = 4;
     
     if (result && result.status === 'success' && Number.isInteger(result.count) && result.count > 0) {
         const cached = this.groupCache.get(item.id) || {};
@@ -862,13 +870,15 @@ class WhatsAppService {
         
         this.participantSync.success++;
         
-        console.log(`[PARTICIPANT_SYNC] groupId=${item.id} count=${result.count} status=success source=${result.source}`);
+        console.log(`[PARTICIPANT_WORKER] group=${item.id} attempt=${item.attempts} source=${result.source} count=${result.count} status=success duration=${result.duration}ms`);
+        console.log(`[SYNC_REAL] participants success=${this.participantSync.success} retrying=${this.participantRetryQueue.length} failed=${this.participantSync.failed}`);
         this.io?.emit('wa:group_enriched', cached);
     } else {
         if (item.attempts < maxAttempts) {
             item.status = 'retrying';
             item.nextTry = Date.now() + RETRY_DELAYS[item.attempts];
             this.participantRetryQueue.push(item);
+            console.log(`[PARTICIPANT_WORKER] group=${item.id} attempt=${item.attempts} status=retrying reason=participants_not_hydrated`);
             return;
         } else {
             const cached = this.groupCache.get(item.id) || {};
@@ -877,7 +887,8 @@ class WhatsAppService {
 
             this.participantSync.failed++;
             
-            console.log(`[PARTICIPANT_SYNC] groupId=${item.id} count=null status=failed source=none`);
+            console.log(`[PARTICIPANT_WORKER] group=${item.id} attempt=${item.attempts} status=failed reason=max_retries`);
+            console.log(`[SYNC_REAL] participants success=${this.participantSync.success} retrying=${this.participantRetryQueue.length} failed=${this.participantSync.failed}`);
             this.io?.emit('wa:group_enriched', cached);
         }
     }
@@ -891,14 +902,16 @@ class WhatsAppService {
   async _startEnrichment(groups) {
     if (!this.client || this.status !== 'READY') return;
 
-    const photoGroups = groups.filter(
+    let photoGroups = groups.filter(
         group => typeof group.id === 'string' && group.id.endsWith('@g.us')
     );
     
-    console.log(`\n[GROUP_PHOTO_QUEUE]`);
-    console.log(`totalGroups=${photoGroups.length}`);
-    console.log(`invalidIds=${groups.length - photoGroups.length}`);
-    console.log(`participantPhotoRequests=0`);
+    console.log(`\n[GROUP_PHOTO_QUEUE] totalGroups=${groups.length} validGroupIds=${photoGroups.length} participantPhotoRequests=0`);
+
+    // TEMP TEST WITH 5 GROUPS + TROPA DO 5M
+    const tropa = photoGroups.find(g => g.id === '120363410917701029@g.us');
+    photoGroups = photoGroups.slice(0, 5);
+    if (tropa && !photoGroups.find(g => g.id === tropa.id)) photoGroups.push(tropa);
 
     const crypto = require('crypto');
     this.photoSyncId = crypto.randomUUID();
@@ -1040,62 +1053,44 @@ class WhatsAppService {
 
     if (this.photoSyncId !== syncId) return;
 
-    const RETRY_DELAYS = [0, 3000, 7000, 15000];
-    const maxAttempts = RETRY_DELAYS.length;
+    const RETRY_DELAYS = [0, 1000, 2000, 4000, 8000];
+    const maxAttempts = 4;
     
-    if (result && result.status === 'success' && typeof result.url === 'string') {
-        const proxyPhotoUrl = `${process.env.PUBLIC_URL || 'https://arthurvault-backend-production.up.railway.app'}/api/group-photo/${encodeURIComponent(item.id)}?v=${Date.now()}`;
+    if (result && result.status === 'success' && result.url) {
         const cached = this.groupCache.get(item.id) || {};
-        cached.photoUrl = proxyPhotoUrl;
+        const proxyUrl = `/api/group-photo/${encodeURIComponent(item.id)}?t=${Date.now()}`;
+        cached.photoUrl = proxyUrl;
         cached.originalPhotoUrl = result.url;
         cached.photoStatus = 'success';
         this.groupCache.set(item.id, cached);
         
         this.photoSync.success++;
         
-        console.log(`[GROUP_PHOTO]`);
-        console.log(`id=${item.id}`);
-        console.log(`attempt=${item.attempts}`);
-        console.log(`status=success`);
-        console.log(`durationMs=${Date.now() - startMs}`);
-
-        this.io?.emit('wa:group_enriched', cached);
-    } else if (result && result.status === 'no_photo') {
-        const cached = this.groupCache.get(item.id) || {};
-        cached.photoStatus = 'no_photo';
-        this.groupCache.set(item.id, cached);
-
-        this.photoSync.noPhoto++;
-        
-        console.log(`[GROUP_PHOTO]`);
-        console.log(`id=${item.id}`);
-        console.log(`status=no_photo`);
-
+        console.log(`[PHOTO_WORKER] group=${item.id} attempt=${item.attempts} source=${result.source} status=success duration=${result.duration}ms`);
+        console.log(`[SYNC_REAL] photos success=${this.photoSync.success} retrying=${this.photoRetryQueue.length} no_photo=${this.photoSync.noPhoto} failed=${this.photoSync.failed}`);
         this.io?.emit('wa:group_enriched', cached);
     } else {
         if (item.attempts < maxAttempts) {
             item.status = 'retrying';
             item.nextTry = Date.now() + RETRY_DELAYS[item.attempts];
             this.photoRetryQueue.push(item);
-            
-            console.log(`[GROUP_PHOTO]`);
-            console.log(`id=${item.id}`);
-            console.log(`attempt=${item.attempts}`);
-            console.log(`status=retrying`);
-            console.log(`reason=${errMessage || 'no_url_found'}`);
+            console.log(`[PHOTO_WORKER] group=${item.id} attempt=${item.attempts} status=retrying reason=photo_not_hydrated`);
             return;
         } else {
             const cached = this.groupCache.get(item.id) || {};
-            cached.photoStatus = 'failed';
+            if (errMessage && errMessage.includes('TIMEOUT')) {
+                cached.photoStatus = 'failed';
+                this.photoSync.failed++;
+                console.log(`[PHOTO_WORKER] group=${item.id} attempt=${item.attempts} status=failed reason=timeout`);
+            } else {
+                cached.photoStatus = 'no_photo';
+                cached.photoUrl = null;
+                cached.originalPhotoUrl = null;
+                this.photoSync.noPhoto++;
+                console.log(`[PHOTO_WORKER] group=${item.id} attempt=${item.attempts} status=no_photo reason=not_found_after_retries`);
+            }
             this.groupCache.set(item.id, cached);
-
-            this.photoSync.failed++;
-            
-            console.log(`[GROUP_PHOTO]`);
-            console.log(`id=${item.id}`);
-            console.log(`attempt=${item.attempts}`);
-            console.log(`status=failed_final`);
-            
+            console.log(`[SYNC_REAL] photos success=${this.photoSync.success} retrying=${this.photoRetryQueue.length} no_photo=${this.photoSync.noPhoto} failed=${this.photoSync.failed}`);
             this.io?.emit('wa:group_enriched', cached);
         }
     }
