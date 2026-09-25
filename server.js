@@ -438,6 +438,15 @@ app.get('/api/test-diagnostic', async (req, res) => {
     }
 });
 
+app.get('/api/start', async (req, res) => {
+    try {
+        whatsappService.initialize();
+        res.json({ success: true, message: 'Initialization started' });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend server running on port ${PORT}`);
