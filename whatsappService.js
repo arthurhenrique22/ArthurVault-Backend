@@ -588,250 +588,226 @@ class WhatsAppService {
 
   async _startEnrichment(groups) {
     if (!this.client || this.status !== 'READY') return;
-    
-    console.log(`\n========================================`);
-    console.log(`[GROUP_ENRICH] started: ${groups.length}`);
-    console.log(`========================================\n`);
 
-    this.syncStats = {
-      totalGroups: groups.length,
-      photos: { processed: 0, success: 0, failed: 0, noPhoto: 0, retrying: 0 },
-      participants: { processed: 0, success: 0, failed: 0 },
-      currentGroupId: null
+    const photoGroups = groups.filter(
+        group => typeof group.id === 'string' && group.id.endsWith('@g.us')
+    );
+    
+    console.log(`\n[GROUP_PHOTO_QUEUE]`);
+    console.log(`totalGroups=${photoGroups.length}`);
+    console.log(`invalidIds=${groups.length - photoGroups.length}`);
+    console.log(`participantPhotoRequests=0`);
+
+    const crypto = require('crypto');
+    this.photoSyncId = crypto.randomUUID();
+    const currentSyncId = this.photoSyncId;
+
+    this.photoSync = {
+        syncId: currentSyncId,
+        total: photoGroups.length,
+        processed: 0,
+        success: 0,
+        noPhoto: 0,
+        failed: 0,
+        pending: photoGroups.length,
+        percentage: 0,
+        running: true
     };
-    this.emitSyncProgress();
-
-    let enrichedCount = 0;
     
-    const limit = 3;
-    const active = new Set();
-    let processed = 0;
+    this.photoRetryQueue = [];
 
-    for (const group of groups) {
-      if (!this.client || this.status !== 'READY') break;
-
-      const enrichTask = (async () => {
-        processed++;
-        const isDiag = processed <= 3; 
-        const rawGroupId = group.id;
-
-        const cached = this.groupCache.get(rawGroupId);
-        if (cached && cached.photoStatus === 'success' && cached.participantStatus === 'success') {
-            this.io?.emit('wa:group_enriched', cached);
-            photosFound++;
-            participantsLoaded++;
-            enrichedCount++;
-            return;
-        }
-
-        const result = await this.resolveGroupMetadata(rawGroupId, isDiag, false);
-
-        if (isDiag) {
-            console.log(`\n[GROUP_VERIFY]`);
-            console.log(`name=${group.name}`);
-            console.log(`id=${result.id}`);
-            console.log(`participants=${result.participantsCount}`);
-            console.log(`participantsSource=${result.participantsSource}`);
-        }
-
-        const participantStatus = typeof result.participantsCount === 'number' ? 'success' : 'failed';
+    for (const g of photoGroups) {
+        const cached = this.groupCache.get(g.id) || { id: g.id, name: g.name };
+        this.groupCache.set(g.id, cached);
         
-        const enriched = { 
-          id: result.id, 
-          photoUrl: null, 
-          originalPhotoUrl: null,
-          participantsCount: result.participantsCount,
-          isCommunity: result.isCommunity,
-          participantStatus,
-          photoStatus: 'pending',
-          photoAttempts: 0
-        };
-        
-        // Save initial status
-        const existingCache = this.groupCache.get(result.id);
-        if (!existingCache || existingCache.participantStatus !== 'success') {
-            this.groupCache.set(result.id, enriched);
-            this.io?.emit('wa:group_enriched', enriched);
+        if (cached.photoStatus === 'success' || cached.photoStatus === 'no_photo') {
+            this.photoSync.success += (cached.photoStatus === 'success' ? 1 : 0);
+            this.photoSync.noPhoto += (cached.photoStatus === 'no_photo' ? 1 : 0);
+            this.photoSync.processed++;
+            this.photoSync.pending--;
+        } else {
+            this.photoRetryQueue.push({
+                id: g.id,
+                name: g.name,
+                attempts: 0,
+                status: 'pending',
+                nextTry: 0
+            });
         }
-
-        if (participantStatus === 'success') this.syncStats.participants.success++;
-        else this.syncStats.participants.failed++;
-        this.syncStats.participants.processed++;
-        this.emitSyncProgress();
-
-        this._schedulePhotoRetry(result.id, group.name, 1);
-        
-        enrichedCount++;
-      })();
-
-      active.add(enrichTask);
-      enrichTask.finally(() => active.delete(enrichTask));
-      
-      if (active.size >= limit) {
-        await Promise.race(active);
-      }
     }
     
-    await Promise.all(active);
+    this.photoSync.percentage = Math.floor((this.photoSync.processed / (this.photoSync.total || 1)) * 100);
+    this._emitPhotoSyncProgress();
     
-    console.log(`\n========================================`);
-    console.log(`ARTHURVAULT PARTICIPANTS ENRICHMENT FINISHED`);
-    console.log(`========================================\n`);
-
-    // Start retry queue processor
-    this._processPhotoRetryQueue();
+    if (this.photoSyncRunning) {
+        return;
+    }
+    
+    this.photoSyncRunning = true;
+    try {
+        await this._processPhotoQueue(currentSyncId);
+    } finally {
+        if (this.photoSyncId === currentSyncId) {
+            this.photoSyncRunning = false;
+        }
+    }
   }
 
-  emitSyncProgress() {
-      if (this.io && this.syncStats) {
-          this.io.emit('wa:sync_progress', this.syncStats);
-      }
-  }
-
-  // --- PHOTO RETRY SYSTEM ---
-  
-  photoRetryQueue = [];
-  isProcessingRetries = false;
-
-  _schedulePhotoRetry(groupId, groupName, attempt) {
-      if (attempt > 5) {
-          const cached = this.groupCache.get(groupId);
-          if (cached && cached.photoStatus !== 'success' && cached.photoStatus !== 'no_photo') {
-              cached.photoStatus = 'failed';
-              this.groupCache.set(groupId, cached);
-              this.io?.emit('wa:group_enriched', cached);
-              
-              if (this.syncStats.photos.retrying > 0) this.syncStats.photos.retrying--;
-              this.syncStats.photos.failed++;
-              this.syncStats.photos.processed++;
-              this.emitSyncProgress();
-              
-              console.log(`[PHOTO_QUEUE] group=${groupId} status=failed attempts=5`);
-          }
-          return;
-      }
-      this.photoRetryQueue.push({ groupId, groupName, attempt });
-  }
-
-  async _processPhotoRetryQueue() {
-      if (this.isProcessingRetries) return;
-      this.isProcessingRetries = true;
-      
-      const PHOTO_CONCURRENCY = 2;
-      const RETRY_DELAYS = [0, 3000, 7000, 15000, 30000];
-      
-      console.log(`\n[PHOTO_QUEUE] started total=${this.syncStats.totalGroups} concurrency=${PHOTO_CONCURRENCY}`);
-      
-      const activeTasks = new Set();
-      
-      while (this.photoRetryQueue.length > 0 || activeTasks.size > 0) {
-          if (this.status !== 'READY') break;
+  _emitPhotoSyncProgress() {
+      if (this.io && this.photoSync) {
+          this.io.emit('wa:sync_progress', {
+              syncId: this.photoSync.syncId,
+              type: 'group_photos',
+              total: this.photoSync.total,
+              processed: this.photoSync.processed,
+              success: this.photoSync.success,
+              noPhoto: this.photoSync.noPhoto,
+              failed: this.photoSync.failed,
+              pending: this.photoSync.pending,
+              percentage: this.photoSync.percentage,
+              running: this.photoSync.running
+          });
           
-          if (this.photoRetryQueue.length > 0 && activeTasks.size < PHOTO_CONCURRENCY) {
-              const task = this.photoRetryQueue.shift();
-              
-              const p = (async () => {
-                  const { groupId, groupName, attempt } = task;
-                  const cached = this.groupCache.get(groupId);
-                  if (cached && cached.photoStatus === 'success') return;
-                  
-                  if (this.syncStats) {
-                      this.syncStats.currentGroupId = groupId;
-                      if (attempt === 1 && cached && cached.photoStatus === 'pending') {
-                          cached.photoStatus = 'loading';
-                          this.io?.emit('wa:group_enriched', cached);
-                      } else if (attempt > 1 && cached && cached.photoStatus !== 'retrying') {
-                          cached.photoStatus = 'retrying';
-                          this.io?.emit('wa:group_enriched', cached);
-                      }
-                      this.emitSyncProgress();
-                  }
-                  
-                  console.log(`[PHOTO_QUEUE] group=${groupId} attempt=${attempt}`);
-                  
-                  const delay = RETRY_DELAYS[attempt - 1] || 0;
-                  if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
-                  
-                  const result = await this.resolveGroupMetadata(groupId, false, true);
-                  
-                  if (typeof result.photoUrl === 'string') {
-                      const isValid = await this.validatePhotoUrl(result.photoUrl);
-                      if (isValid) {
-                          const proxyPhotoUrl = `${process.env.PUBLIC_URL || 'https://arthurvault-backend-production.up.railway.app'}/api/group-photo/${encodeURIComponent(result.id)}?v=${Date.now()}`;
-                          if (cached) {
-                              cached.photoUrl = proxyPhotoUrl;
-                              cached.originalPhotoUrl = result.photoUrl;
-                              cached.photoStatus = 'success';
-                              this.groupCache.set(groupId, cached);
-                              this.io?.emit('wa:group_enriched', cached);
-                          }
-                          if (attempt > 1) this.syncStats.photos.retrying--;
-                          this.syncStats.photos.success++;
-                          this.syncStats.photos.processed++;
-                          this.emitSyncProgress();
-                          console.log(`[PHOTO_QUEUE] group=${groupId} status=success bytes=verified`);
-                      } else {
-                          console.log(`[PHOTO_QUEUE] group=${groupId} status=retrying error="invalid_image_data" nextAttempt=${attempt + 1}`);
-                          if (attempt === 1) {
-                              this.syncStats.photos.retrying++;
-                              this.emitSyncProgress();
-                          }
-                          this._schedulePhotoRetry(groupId, groupName, attempt + 1);
-                      }
-                  } else if (result.photoUrl === null && result.photoSource !== 'none' && result.photoSource !== 'evaluate.failed') {
-                      if (cached) {
-                          cached.photoStatus = 'no_photo';
-                          this.groupCache.set(groupId, cached);
-                          this.io?.emit('wa:group_enriched', cached);
-                      }
-                      if (attempt > 1) this.syncStats.photos.retrying--;
-                      this.syncStats.photos.noPhoto++;
-                      this.syncStats.photos.processed++;
-                      this.emitSyncProgress();
-                      console.log(`[PHOTO_QUEUE] group=${groupId} status=no_photo`);
-                  } else {
-                      console.log(`[PHOTO_QUEUE] group=${groupId} status=retrying nextAttempt=${attempt + 1}`);
-                      if (attempt === 1) {
-                          this.syncStats.photos.retrying++;
-                          this.emitSyncProgress();
-                      }
-                      this._schedulePhotoRetry(groupId, groupName, attempt + 1);
-                  }
-              })();
-              activeTasks.add(p);
-              p.finally(() => activeTasks.delete(p));
-          } else {
-              await Promise.race(activeTasks);
-          }
+          console.log(`[GROUP_PHOTO_PROGRESS] syncId=${this.photoSync.syncId} processed=${this.photoSync.processed}/${this.photoSync.total} success=${this.photoSync.success} noPhoto=${this.photoSync.noPhoto} failed=${this.photoSync.failed} percentage=${this.photoSync.percentage} queue=${this.photoRetryQueue.length}`);
       }
-      
-      this.isProcessingRetries = false;
-      if (this.syncStats) {
-          this.syncStats.currentGroupId = null;
-          this.emitSyncProgress();
-      }
-      console.log(`[PHOTO_QUEUE] finished processing`);
+  }
+
+  async _processPhotoQueue(syncId) {
+    const PHOTO_CONCURRENCY = 2;
+    const activeWorkers = new Set();
+    
+    while (this.photoSyncId === syncId && this.status === 'READY') {
+        const now = Date.now();
+        const nextIdx = this.photoRetryQueue.findIndex(item => 
+            (item.status === 'pending') ||
+            (item.status === 'retrying' && now >= item.nextTry)
+        );
+        
+        if (nextIdx !== -1 && activeWorkers.size < PHOTO_CONCURRENCY) {
+            const item = this.photoRetryQueue.splice(nextIdx, 1)[0];
+            const worker = this._processPhotoItem(item, syncId);
+            activeWorkers.add(worker);
+            worker.finally(() => activeWorkers.delete(worker));
+            continue;
+        }
+        
+        if (activeWorkers.size > 0) {
+            await Promise.race(Array.from(activeWorkers));
+            continue;
+        }
+        
+        const hasRetrying = this.photoRetryQueue.some(item => item.status === 'retrying');
+        if (hasRetrying) {
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+        }
+        
+        break;
+    }
+    
+    if (this.photoSyncId === syncId && this.photoSync.processed === this.photoSync.total) {
+        this.photoSync.running = false;
+        this.photoSync.percentage = 100;
+        this._emitPhotoSyncProgress();
+        console.log(`\n[GROUP_PHOTO_SYNC_COMPLETE]`);
+        console.log(`total=${this.photoSync.total}`);
+        console.log(`success=${this.photoSync.success}`);
+        console.log(`noPhoto=${this.photoSync.noPhoto}`);
+        console.log(`failed=${this.photoSync.failed}`);
+    }
+  }
+
+  async _processPhotoItem(item, syncId) {
+    if (this.photoSyncId !== syncId) return;
+    
+    item.attempts++;
+    item.status = 'loading';
+    console.log(`\n[GROUP_PHOTO]`);
+    console.log(`id=${item.id}`);
+    console.log(`attempt=${item.attempts}`);
+    console.log(`status=loading`);
+    
+    const startMs = Date.now();
+    let result = null;
+    let errMessage = null;
+
+    try {
+        const fetchPromise = this.resolveGroupMetadata(item.id, false, true);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT:resolveGroupMetadata')), 12000));
+        result = await Promise.race([fetchPromise, timeoutPromise]);
+    } catch(err) {
+        errMessage = err.message;
+    }
+
+    if (this.photoSyncId !== syncId) return;
+
+    const RETRY_DELAYS = [0, 3000, 7000, 15000];
+    const maxAttempts = RETRY_DELAYS.length;
+    
+    if (result && typeof result.photoUrl === 'string') {
+        const proxyPhotoUrl = `${process.env.PUBLIC_URL || 'https://arthurvault-backend-production.up.railway.app'}/api/group-photo/${encodeURIComponent(item.id)}?v=${Date.now()}`;
+        const cached = this.groupCache.get(item.id) || {};
+        cached.photoUrl = proxyPhotoUrl;
+        cached.originalPhotoUrl = result.photoUrl;
+        cached.photoStatus = 'success';
+        this.groupCache.set(item.id, cached);
+        
+        this.photoSync.success++;
+        
+        console.log(`[GROUP_PHOTO]`);
+        console.log(`id=${item.id}`);
+        console.log(`attempt=${item.attempts}`);
+        console.log(`status=success`);
+        console.log(`durationMs=${Date.now() - startMs}`);
+
+        this.io?.emit('wa:group_enriched', cached);
+    } else if (result && result.photoUrl === null && result.photoSource !== 'none' && result.photoSource !== 'evaluate.failed') {
+        const cached = this.groupCache.get(item.id) || {};
+        cached.photoStatus = 'no_photo';
+        this.groupCache.set(item.id, cached);
+
+        this.photoSync.noPhoto++;
+        
+        console.log(`[GROUP_PHOTO]`);
+        console.log(`id=${item.id}`);
+        console.log(`status=no_photo`);
+
+        this.io?.emit('wa:group_enriched', cached);
+    } else {
+        if (item.attempts < maxAttempts) {
+            item.status = 'retrying';
+            item.nextTry = Date.now() + RETRY_DELAYS[item.attempts];
+            this.photoRetryQueue.push(item);
+            
+            console.log(`[GROUP_PHOTO]`);
+            console.log(`id=${item.id}`);
+            console.log(`attempt=${item.attempts}`);
+            console.log(`status=retrying`);
+            console.log(`reason=${errMessage || 'no_url_found'}`);
+            return;
+        } else {
+            const cached = this.groupCache.get(item.id) || {};
+            cached.photoStatus = 'failed';
+            this.groupCache.set(item.id, cached);
+
+            this.photoSync.failed++;
+            
+            console.log(`[GROUP_PHOTO]`);
+            console.log(`id=${item.id}`);
+            console.log(`attempt=${item.attempts}`);
+            console.log(`status=failed_final`);
+            
+            this.io?.emit('wa:group_enriched', cached);
+        }
+    }
+
+    this.photoSync.processed = this.photoSync.success + this.photoSync.noPhoto + this.photoSync.failed;
+    this.photoSync.pending = this.photoSync.total - this.photoSync.processed;
+    this.photoSync.percentage = Math.floor((this.photoSync.processed / (this.photoSync.total || 1)) * 100);
+    this._emitPhotoSyncProgress();
   }
 
   retryFailedPhotos() {
-      if (!this.syncStats) return;
-      let count = 0;
-      for (const [groupId, cached] of this.groupCache.entries()) {
-          if (cached.photoStatus === 'failed') {
-              cached.photoStatus = 'retrying';
-              this.io?.emit('wa:group_enriched', cached);
-              this._schedulePhotoRetry(groupId, cached.name || 'Unknown', 1);
-              count++;
-          }
-      }
-      if (count > 0) {
-          this.syncStats.photos.failed -= count;
-          this.syncStats.photos.retrying += count;
-          this.syncStats.photos.processed -= count;
-          this.emitSyncProgress();
-          this._processPhotoRetryQueue();
-      }
-      return count;
   }
 
   onDemandPhotoLocks = new Map();
